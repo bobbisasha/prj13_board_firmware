@@ -1,0 +1,23 @@
+# Cartelle di build
+Debug/
+Release/
+FlashROM*/
+
+# File generati dal compilatore
+makefile*
+*.libs
+*.aem3
+*.obj
+*.out
+*.bin
+*.hex
+*.map
+*.exclude
+
+# Impostazioni locali e indici
+.settings/
+.theia/
+.clangd/
+compile_commands.json
+*.theia-workspace
+.launches/
