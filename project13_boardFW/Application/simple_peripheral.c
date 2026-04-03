@@ -1245,11 +1245,8 @@ static void SimplePeripheral_performPeriodicTask(void)
               uint16_t distanza_mm = (d1 << 8) | d2;
               
               if (distanza_mm <= 4500) {
-                  // Converte in centimetri per stare nel byte della Char1 (max 255)
-                  uint8_t distanza_cm = (uint8_t)(distanza_mm / 10);
-                  
-                  // Invia il dato tramite Bluetooth (aggiorna la Characteristic 1)
-                  SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, sizeof(uint8_t), &distanza_cm);
+                  // Invia il dato a 16 bit tramite Bluetooth (aggiorna la Characteristic 1)
+                  SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, sizeof(uint16_t), &distanza_mm);
               }
           }
       } else {

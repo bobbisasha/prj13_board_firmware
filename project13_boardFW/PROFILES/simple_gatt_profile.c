@@ -538,7 +538,8 @@ bStatus_t SimpleProfile_GetParameter( uint8 param, void *value )
   switch ( param )
   {
     case SIMPLEPROFILE_CHAR1:
-      VOID memcpy(value, simpleProfileChar1, 2); // <-- Copia i 2 byte in uscita      break;
+      VOID memcpy(value, simpleProfileChar1, 2); // <-- Copia i 2 byte in uscita      
+      break;
 
     case SIMPLEPROFILE_CHAR2:
       *((uint8*)value) = simpleProfileChar2;
@@ -694,40 +695,6 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
           uint8 *pCurValue = (uint8 *)pAttr->pValue;
           *pCurValue = pValue[0];
           notifyApp = SIMPLEPROFILE_CHAR3;
-        }
-        break;
-      
-
-      case SIMPLEPROFILE_CHAR3_UUID:
-
-        //Validate the value
-        // Make sure it's not a blob oper
-        if ( offset == 0 )
-        {
-          if ( len != 1 )
-          {
-            status = ATT_ERR_INVALID_VALUE_SIZE;
-          }
-        }
-        else
-        {
-          status = ATT_ERR_ATTR_NOT_LONG;
-        }
-
-        //Write the value
-        if ( status == SUCCESS )
-        {
-          uint8 *pCurValue = (uint8 *)pAttr->pValue;
-          *pCurValue = pValue[0];
-
-          if( pAttr->pValue == &simpleProfileChar1 )
-          {
-            notifyApp = SIMPLEPROFILE_CHAR1;
-          }
-          else
-          {
-            notifyApp = SIMPLEPROFILE_CHAR3;
-          }
         }
 
         break;
