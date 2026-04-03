@@ -21,3 +21,6 @@ makefile*
 compile_commands.json
 *.theia-workspace
 .launches/
+.DS_Store
+simple_peripheral_cc2640r2lp_stack_library/FlashROM_Library/.clangd/compile_commands.json
+project13_boardFW/FlashROM_StackLibrary/.clangd/compile_commands.json
