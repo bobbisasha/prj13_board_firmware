@@ -213,7 +213,7 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
         { ATT_BT_UUID_SIZE, simpleProfilechar1UUID },
         GATT_PERMIT_READ | GATT_PERMIT_WRITE,
         0,
-        &simpleProfileChar1
+        simpleProfileChar1
       },
 
       // Characteristic 1 User Description
@@ -454,8 +454,9 @@ bStatus_t SimpleProfile_SetParameter( uint8 param, uint8 len, void *value )
     case SIMPLEPROFILE_CHAR1:
       if ( len == 2 )
       {
-        simpleProfileChar1 = *((uint8*)value);
+        VOID memcpy(simpleProfileChar1, value, 2); // <--- CORREZIONE
       }
+      
       else
       {
         ret = bleInvalidRange;
