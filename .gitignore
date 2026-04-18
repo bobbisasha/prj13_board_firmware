@@ -3,6 +3,10 @@ Debug/
 Release/
 FlashROM*/
 
+#Cartella di build del progetto SCS
+Projects/
+
+
 # File generati dal compilatore
 makefile*
 *.libs
@@ -13,6 +17,10 @@ makefile*
 *.hex
 *.map
 *.exclude
+*.bat
+*.scp
+
+
 
 # Impostazioni locali e indici
 .settings/
