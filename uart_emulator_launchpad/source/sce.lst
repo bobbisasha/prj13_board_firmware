@@ -1,0 +1,1168 @@
+               .deffile adi_defs__0.asm
+               .deffile ddi_defs__0.asm
+               .deffile reg_defs__0.asm
+               .deffile sce_defs__0.asm
+
+               ; Number of supported tasks
+               .define TASK_COUNT      1
+
+               ; Resource-specified definitions, if any
+               .define UART_TX_BUFFER_SIZE     64
+               .define UART_RX_BUFFER_SIZE     64
+               .define AUXIO_UART_TX           14
+               .define AUXIO_UART_RX           13
+               .alias  uartTaskName            uartEmulator
+
+
+               .segment begin "Framework"
+
+
+               VectorTable:
+0000 ---- 1408                         jsr         PowerUp
+0001 ---- 040c                         jmp         TaskCtrlReqVector
+0002 ---- 1408                         jsr         PowerUp
+0003 ---- 042c                         jmp         AonRtcCh2Vector
+0004 ---- 1408                         jsr         PowerUp
+0005 ---- 0447                         jmp         Event0Vector
+0006 ---- 1408                         jsr         PowerUp
+0007 ---- 044d                         jmp         TaskAlertAckVector
+
+
+
+
+               PowerUp:
+                                       ; Deassert the power-down request
+0008 ---- 4436                         iobclr      #0, [#IOP_WUC_PWRDWNREQ]
+
+                                       ; Wait for it to take effect
+0009 ---- 2437 /waitForPdAck:          iobtst      #0, [#IOP_WUC_PWRDWNACK]
+000a ---- aefe                         biob1       /waitForPdAck
+
+               FwEmptyFunc:            ; Done
+000b ---- adb7                         rts
+
+
+
+
+               TaskCtrlReqVector:
+                                       ; Clear the vector flag
+000c ---- 6442                         iobset      #0, [#IOP_EVCTL_VECFLAGSCLR]
+
+                                       ; For each task ...
+000d ---- 7000                         ld          R7, #0
+               /loop:
+                                           ; Save the task ID
+000e ---- 7c6b                             st          R7, [#fwCtrlInt/taskId]
+
+                                           ; Handle initialize request, if any
+000f ---- 6872                             ld          R6, [#fwCtrlExt/bvTaskInitializeReq]
+0010 ---- 0068                             ld          R0, #pFwTaskInitializeFuncTable
+0011 ---- 1425                             jsr         /handleReq
+
+                                           ; Handle execute request, if any
+0012 ---- 6873                             ld          R6, [#fwCtrlExt/bvTaskExecuteReq]
+0013 ---- 0069                             ld          R0, #pFwTaskExecuteFuncTable
+0014 ---- 1425                             jsr         /handleReq
+
+                                           ; Handle terminate request, if any
+0015 ---- 6874                             ld          R6, [#fwCtrlExt/bvTaskTerminateReq]
+0016 ---- 006a                             ld          R0, #pFwTaskTerminateFuncTable
+0017 ---- 1425                             jsr         /handleReq
+
+                                           ; Move on to the next task
+0018 ---- 786b                             ld          R7, [#fwCtrlInt/taskId]
+0019 ---- f801                             add         R7, #1
+
+001a ---- fa01                         cmp         R7, #TASK_COUNT
+001b ---- bef2                         bneq        /loop
+
+                                       ; Update which tasks are ...
+001c ---- 7870                         ld          R7, [#fwCtrlExt/bvActiveTasks]
+                                       ; ... currently active ...
+001d ---- 6872                         ld          R6, [#fwCtrlExt/bvTaskInitializeReq]
+001e ---- fd0e                         or          R7, R6
+                                       ; ... and inactive ...
+001f ---- 6874                         ld          R6, [#fwCtrlExt/bvTaskTerminateReq]
+0020 ---- ed92                         inv         R6
+0021 ---- fd06                         and         R7, R6
+0022 ---- 7c70                         st          R7, [#fwCtrlExt/bvActiveTasks]
+
+                                       ; We're READY for another request
+0023 ---- 642d                         iobset      #IOB_EVCTL_SWEV_READY, [#IOP_EVCTL_SWEVSET]
+
+                                       ; Generate an ALERT interrupt if needed before powering back down
+0024 ---- 0450                         jmp         GenAlertInterrupt;
+
+               /handleReq:
+                                       ; Restore the task ID, and load the function pointer (here to avoid pipeline hazard)
+0025 ---- 786b                         ld          R7, [#fwCtrlInt/taskId]
+0026 ---- 8f1f                         ld          R0, [R7+R0]
+
+                                       ; Skip this request?
+0027 ---- ed8f                         lsr         R6, R7
+0028 ---- ec01                         tst         R6, #0x0001
+0029 ---- be01                         bnz         /noSkip
+002a ---- adb7                             rts
+               /noSkip:
+                                       ; Make the call by jump, with return (rts) in the "called" function
+002b ---- 8db7                         jmp         R0
+
+
+
+
+               AonRtcCh2Vector:
+                                       ; Start clearing the RTC event
+002c ---- 6630                         iobset      #IOB_WUC_WUEV_RTC, [#IOP_WUC_WUEVCLR]
+
+                                       ; Clear the vector flag
+002d ---- 6542                         iobset      #1, [#IOP_EVCTL_VECFLAGSCLR]
+
+                                       ; For each task (R0 is the current task ID) ...
+002e ---- 0000                         ld          R0, #0
+               /loop:
+                                           ; ... that is active ...
+002f ---- 1870                             ld          R1, [#fwCtrlExt/bvActiveTasks]
+0030 ---- 9d88                             lsr         R1, R0
+0031 ---- 9c01                             tst         R1, #0x0001
+0032 ---- b60d                             bz          /skip
+
+                                               ; Fetch number of RTC intervals until next execution
+0033 ---- 1067                                 ld          R1, #pFwTaskExecuteScheduleTable
+0034 ---- af19                                 ld          R2, [R1+R0]
+
+                                               ; If not already 0, decrement and store. If then 0 ...
+0035 ---- aa00                                 cmp         R2, #0
+0036 ---- b609                                 beq         /skip
+0037 ---- a8ff                                 add         R2, #-1
+0038 ---- af39                                 st          R2, [R1+R0]
+0039 ---- be06                                 bnz         /skip
+
+                                                   ; ... execute the task
+003a ---- 0c6b                                     st          R0, [#fwCtrlInt/taskId]
+003b ---- 8869                                     add         R0, #pFwTaskExecuteFuncTable
+003c ---- 8f08                                     ld          R0, [R0]
+                                                   ; Insert NOP to avoid pipeline hazard
+003d ---- fd47                                     nop
+003e ---- 9db7                                     jsr         R0
+003f ---- 086b                                     ld          R0, [#fwCtrlInt/taskId]
+               /skip:
+                                           ; Move on to the next task
+0040 ---- 8801                             add         R0, #1
+
+0041 ---- 8a01                         cmp         R0, #TASK_COUNT
+0042 ---- beec                         bneq        /loop
+
+                                       ; Wait for the ACK event to be cleared
+0043 ---- 262f /waitOnRtcClearing:     iobtst      #IOB_WUC_WUEV_RTC, [#IOP_WUC_WUEVFLAGS]
+0044 ---- aefe                         biob1       /waitOnRtcClearing
+0045 ---- 4630                         iobclr      #IOB_WUC_WUEV_RTC, [#IOP_WUC_WUEVCLR]
+
+                                       ; Generate an ALERT interrupt if needed
+0046 ---- 0450                         jmp         GenAlertInterrupt;
+
+
+
+
+               Event0Vector:
+                                       ; Disable and clear the vector flag
+0047 ---- 5527                         iobclr      #IOB_EVCTL_VECCFG1_VEC2_EN, [#IOP_EVCTL_VECCFG1]
+0048 ---- 6642                         iobset      #2, [#IOP_EVCTL_VECFLAGSCLR]
+
+                                       ; Set the task ID
+0049 ---- 0000                         ld          R0, #0
+004a ---- 0c6b                         st          R0, [#fwCtrlInt/taskId]
+
+                                       ; Jump to the event task code
+004b ---- 140b                         jsr         FwEmptyFunc
+
+                                       ; Generate an ALERT interrupt if needed
+004c ---- 0450                         jmp         GenAlertInterrupt;
+
+
+
+
+               TaskAlertAckVector:
+                                       ; Clear the vector flag
+004d ---- 6742                         iobset      #3, [#IOP_EVCTL_VECFLAGSCLR]
+
+                                       ; Re-enable generation of ALERT interrupts
+004e ---- 03ff                         ld          R0, #-1
+004f ---- 0c6d                         st          R0, [#fwCtrlInt/alertGenMask]
+
+                                       ; Fall through to GenAlertInterrupt to generate another ALERT interrupt if needed
+
+
+
+
+               GenAlertInterrupt:
+                                       ; Do we have any ALERT-generating flags pending?
+0050 ---- 786c                         ld          R7, [#fwCtrlInt/bvTaskIoAlert]
+
+                                       ; Skip if the last I/O ALERT interrupt has not been acknowledged
+0051 ---- 686d                         ld          R6, [#fwCtrlInt/alertGenMask]
+0052 ---- ed37                         tst         R6, R7
+0053 ---- b605                         bz          /skipAlertGen
+
+                                           ; Transfer I/O flags from internal to external
+0054 ---- 0000                             ld          R0, #0
+0055 ---- 0c6c                             st          R0, [#fwCtrlInt/bvTaskIoAlert]
+0056 ---- 7c71                             st          R7, [#fwCtrlExt/bvTaskIoAlert]
+
+                                           ; Generate the ALERT interrupt, and clear the generation mask
+0057 ---- 652d                             iobset      #IOB_EVCTL_SWEV_ALERT, [#IOP_EVCTL_SWEVSET]
+0058 ---- 0c6d                             st          R0, [#fwCtrlInt/alertGenMask]
+               /skipAlertGen:
+                                       ; Fall through to PowerDown ...
+
+
+
+
+               PowerDown:
+                                       ; If there are no unacknowledged ALERTs and no vectors pending ...
+0059 ---- 786d                         ld          R7, [#fwCtrlInt/alertGenMask]
+005a ---- 686e                         ld          R6, [#fwCtrlInt/alertCanPdAuxMask]
+005b ---- fd0e                         or          R7, R6
+005c ---- f801                         add         R7, #1 ; 0xFFFF -> 0x0000
+005d ---- e92b                         in          R6, [#IOP_EVCTL_VECFLAGS]
+005e ---- fd0e                         or          R7, R6
+005f ---- be01                         bnz         /noPowerDown
+
+                                           ; Assert the power-down request. We'll make sure that it has taken effect
+                                           ; or been completely ignored when waking up again
+0060 ---- 6436                             iobset      #0, [#IOP_WUC_PWRDWNREQ]
+               /noPowerDown:
+                                       ; Sleep until the next event
+0061 ---- bdb7 sleepInstr:             sleep
+
+
+
+
+0062 ---- 241a AdiDdiAcquire:          iobtst      #0, [#IOP_SMPH_SMPH0]
+0063 ---- a6fe                         biob0       AdiDdiAcquire
+0064 ---- adb7                         rts
+
+0065 ---- 641a AdiDdiRelease:          iobset      #0, [#IOP_SMPH_SMPH0]
+0066 ---- adb7                         rts
+
+
+
+
+               ; RTC ticks until next execution, one word for each task
+               pFwTaskExecuteScheduleTable:
+0067 ---- 0000                         dw          #0
+
+               ; Task code function pointers for each task code block, one word for each task
+               pFwTaskInitializeFuncTable:
+0068 ---- 0104                         dw          #uartEmulator/initialize
+               pFwTaskExecuteFuncTable:
+0069 ---- 0105                         dw          #uartEmulator/execute
+               pFwTaskTerminateFuncTable:
+006a ---- 010c                         dw          #uartEmulator/terminate
+
+               ; Run-time logging log requests and masks, one bit for each struct, one word for each task
+               pRtlTaskLogReqTable:
+               ; (Run-time logging is not used in this project)
+               pRtlTaskLogMaskTable:
+               ; (Run-time logging is not used in this project)
+
+
+               ; Internal control data
+               fwCtrlInt:
+006b ---- 0000 /taskId:                dw          #0      ; ID of the currently running task
+006c ---- 0000 /bvTaskIoAlert:         dw          #0x0000 ; LSB = Normal data exchange, MSB = Overflow or underflow
+006d ---- ffff /alertGenMask:          dw          #0xFFFF ; Can generate an ALERT interrupt now? (0xFFFF = yes, 0x0000 = no)
+006e ---- 0000 /alertCanPdAuxMask:     dw          #0x0000 ; Can power down AUX domain after ALERT interrupt generation? (0xFFFF = yes, 0x0000 = no)
+006f ---- 0000 /rtlStructLockReq:      dw          #0x0000 ; Run-time logging struct lock request (0=idle -> 1=requested -> 2=ready -> access -> 0=idle)
+
+               ; External control data, shared with the driver
+               fwCtrlExt:
+0070 ---- 0000 /bvActiveTasks:         dw          #0x0000 ; Indicates which tasks are currently active
+0071 ---- 0000 /bvTaskIoAlert:         dw          #0x0000 ; LSB = Normal data exchange, MSB = Overflow or underflow
+0072 ---- 0000 /bvTaskInitializeReq:   dw          #0x0000 ; Requests tasks to start
+0073 ---- 0000 /bvTaskExecuteReq:      dw          #0x0000 ; Requests tasks to execute once immediately
+0074 ---- 0000 /bvTaskTerminateReq:    dw          #0x0000 ; Requests tasks to stop
+
+
+               .segment end "Framework"
+
+
+               fwTaskDataStructures:
+               .segment begin "Task: UART Emulator"
+               uartEmulator/cfg:
+               uartEmulator/cfg/alertMask:
+0075 ---- 0000                         dw          #0
+               uartEmulator/cfg/alertRxFifoThr:
+0076 ---- 0000                         dw          #0
+               uartEmulator/cfg/alertTxFifoThr:
+0077 ---- 0000                         dw          #0
+               uartEmulator/cfg/rxByteTimeout:
+0078 ---- 0000                         dw          #0
+               uartEmulator/cfg/rxEnableReqIdleCount:
+0079 ---- 0016                         dw          #22
+               uartEmulator/input:
+               uartEmulator/input/pTxBuffer:
+007a ---- 0000                         dw          #0
+007b ---- 0000                         dw          #0
+007c ---- 0000                         dw          #0
+007d ---- 0000                         dw          #0
+007e ---- 0000                         dw          #0
+007f ---- 0000                         dw          #0
+0080 ---- 0000                         dw          #0
+0081 ---- 0000                         dw          #0
+0082 ---- 0000                         dw          #0
+0083 ---- 0000                         dw          #0
+0084 ---- 0000                         dw          #0
+0085 ---- 0000                         dw          #0
+0086 ---- 0000                         dw          #0
+0087 ---- 0000                         dw          #0
+0088 ---- 0000                         dw          #0
+0089 ---- 0000                         dw          #0
+008a ---- 0000                         dw          #0
+008b ---- 0000                         dw          #0
+008c ---- 0000                         dw          #0
+008d ---- 0000                         dw          #0
+008e ---- 0000                         dw          #0
+008f ---- 0000                         dw          #0
+0090 ---- 0000                         dw          #0
+0091 ---- 0000                         dw          #0
+0092 ---- 0000                         dw          #0
+0093 ---- 0000                         dw          #0
+0094 ---- 0000                         dw          #0
+0095 ---- 0000                         dw          #0
+0096 ---- 0000                         dw          #0
+0097 ---- 0000                         dw          #0
+0098 ---- 0000                         dw          #0
+0099 ---- 0000                         dw          #0
+009a ---- 0000                         dw          #0
+009b ---- 0000                         dw          #0
+009c ---- 0000                         dw          #0
+009d ---- 0000                         dw          #0
+009e ---- 0000                         dw          #0
+009f ---- 0000                         dw          #0
+00a0 ---- 0000                         dw          #0
+00a1 ---- 0000                         dw          #0
+00a2 ---- 0000                         dw          #0
+00a3 ---- 0000                         dw          #0
+00a4 ---- 0000                         dw          #0
+00a5 ---- 0000                         dw          #0
+00a6 ---- 0000                         dw          #0
+00a7 ---- 0000                         dw          #0
+00a8 ---- 0000                         dw          #0
+00a9 ---- 0000                         dw          #0
+00aa ---- 0000                         dw          #0
+00ab ---- 0000                         dw          #0
+00ac ---- 0000                         dw          #0
+00ad ---- 0000                         dw          #0
+00ae ---- 0000                         dw          #0
+00af ---- 0000                         dw          #0
+00b0 ---- 0000                         dw          #0
+00b1 ---- 0000                         dw          #0
+00b2 ---- 0000                         dw          #0
+00b3 ---- 0000                         dw          #0
+00b4 ---- 0000                         dw          #0
+00b5 ---- 0000                         dw          #0
+00b6 ---- 0000                         dw          #0
+00b7 ---- 0000                         dw          #0
+00b8 ---- 0000                         dw          #0
+00b9 ---- 0000                         dw          #0
+               uartEmulator/output:
+               uartEmulator/output/pRxBuffer:
+00ba ---- 0000                         dw          #0
+00bb ---- 0000                         dw          #0
+00bc ---- 0000                         dw          #0
+00bd ---- 0000                         dw          #0
+00be ---- 0000                         dw          #0
+00bf ---- 0000                         dw          #0
+00c0 ---- 0000                         dw          #0
+00c1 ---- 0000                         dw          #0
+00c2 ---- 0000                         dw          #0
+00c3 ---- 0000                         dw          #0
+00c4 ---- 0000                         dw          #0
+00c5 ---- 0000                         dw          #0
+00c6 ---- 0000                         dw          #0
+00c7 ---- 0000                         dw          #0
+00c8 ---- 0000                         dw          #0
+00c9 ---- 0000                         dw          #0
+00ca ---- 0000                         dw          #0
+00cb ---- 0000                         dw          #0
+00cc ---- 0000                         dw          #0
+00cd ---- 0000                         dw          #0
+00ce ---- 0000                         dw          #0
+00cf ---- 0000                         dw          #0
+00d0 ---- 0000                         dw          #0
+00d1 ---- 0000                         dw          #0
+00d2 ---- 0000                         dw          #0
+00d3 ---- 0000                         dw          #0
+00d4 ---- 0000                         dw          #0
+00d5 ---- 0000                         dw          #0
+00d6 ---- 0000                         dw          #0
+00d7 ---- 0000                         dw          #0
+00d8 ---- 0000                         dw          #0
+00d9 ---- 0000                         dw          #0
+00da ---- 0000                         dw          #0
+00db ---- 0000                         dw          #0
+00dc ---- 0000                         dw          #0
+00dd ---- 0000                         dw          #0
+00de ---- 0000                         dw          #0
+00df ---- 0000                         dw          #0
+00e0 ---- 0000                         dw          #0
+00e1 ---- 0000                         dw          #0
+00e2 ---- 0000                         dw          #0
+00e3 ---- 0000                         dw          #0
+00e4 ---- 0000                         dw          #0
+00e5 ---- 0000                         dw          #0
+00e6 ---- 0000                         dw          #0
+00e7 ---- 0000                         dw          #0
+00e8 ---- 0000                         dw          #0
+00e9 ---- 0000                         dw          #0
+00ea ---- 0000                         dw          #0
+00eb ---- 0000                         dw          #0
+00ec ---- 0000                         dw          #0
+00ed ---- 0000                         dw          #0
+00ee ---- 0000                         dw          #0
+00ef ---- 0000                         dw          #0
+00f0 ---- 0000                         dw          #0
+00f1 ---- 0000                         dw          #0
+00f2 ---- 0000                         dw          #0
+00f3 ---- 0000                         dw          #0
+00f4 ---- 0000                         dw          #0
+00f5 ---- 0000                         dw          #0
+00f6 ---- 0000                         dw          #0
+00f7 ---- 0000                         dw          #0
+00f8 ---- 0000                         dw          #0
+00f9 ---- 0000                         dw          #0
+               uartEmulator/state:
+               uartEmulator/state/alertBacklog:
+00fa ---- 0000                         dw          #0
+               uartEmulator/state/alertEvents:
+00fb ---- 0000                         dw          #0
+               uartEmulator/state/alertMask:
+00fc ---- 0000                         dw          #0
+               uartEmulator/state/exit:
+00fd ---- 0000                         dw          #0
+               uartEmulator/state/rxEnable:
+00fe ---- 0000                         dw          #0
+               uartEmulator/state/rxEnabled:
+00ff ---- 0000                         dw          #0
+               uartEmulator/state/rxHead:
+0100 ---- 0000                         dw          #0
+               uartEmulator/state/rxTail:
+0101 ---- 0000                         dw          #0
+               uartEmulator/state/txHead:
+0102 ---- 0000                         dw          #0
+               uartEmulator/state/txTail:
+0103 ---- 0000                         dw          #0
+               .segment end "Task: UART Emulator"
+
+
+               .segment begin "Task: UART Emulator"
+               uartEmulator/initialize:
+               ;?
+               uartEmulator/initializeDone:
+0104 ---- adb7                         rts
+
+
+
+
+               uartEmulator/execute:
+               ;? // Run the UART emulator until the application sets state.exit
+               ;?
+               ;? //power ON SensorVDD PIN
+               ;? gpioSetOutput(AUXIO_O_A02YYUW_VDDPIN);
+0105 ---- 660f                         iobset      #(10 & 0x7), [#(IOP_AIODIO0_GPIODOUT + (10 >> 3))]
+               ;?
+               ;? //waiting for sensor settling time
+               ;? fwDelayUs(100000, FW_DELAY_RANGE_100_MS);
+0106 ---- 7093                         ld          R7, #(((100000 * 24 ) + ((1 << 14) - 1)) >> 14)
+0107 ---- 600e                         ld          R6, #14
+0108 ---- 150d                         jsr         FwDelay
+               ;?
+               ;? //serial read
+               ;? uartEmulator();
+0109 ---- 1513                         jsr         UartEmulator
+               ;?
+               ;? //power OFF SensorVDD PIN
+               ;? gpioClearOutput(AUXIO_O_A02YYUW_VDDPIN);
+010a ---- 460f                         iobclr      #(10 & 0x7), [#(IOP_AIODIO0_GPIODOUT + (10 >> 3))]
+               uartEmulator/executeDone:
+010b ---- adb7                         rts
+
+
+
+
+               uartEmulator/terminate:
+               ;?
+               uartEmulator/terminateDone:
+010c ---- adb7                         rts
+               .segment end "Task: UART Emulator"
+
+
+               .segment begin "Procedure Library"
+               ; 3 + 5 CPU cycles = 16 clock cycles = 0.66 microsecond are added to the specified delay (parameter
+               ; loading and timer configuration)
+               ;
+               ; PARAMETERS:
+               ;     R7 = Delay
+               ;     R6 = Prescaler exponent
+               ;
+               ; CLOBBERS:
+               ;     R6
+               FwDelay:
+                                       ; Set the delay
+010d ---- fb0c                         out         R7, [#IOP_TIMER01_T0TARGET]
+
+                                       ; Configure the timer (from clock, single-mode, prescaler exponent = R6)
+010e ---- eda4                         lsl         R6, #4
+010f ---- eb09                         out         R6, [#IOP_TIMER01_T0CFG]
+
+                                       ; Start the timer, wait for it to trigger, and stop it
+0110 ---- 640b                         iobset      #0, [#IOP_TIMER01_T0CTL]
+0111 ---- cdb1                         wev1        #WEVSEL_TIMER0
+0112 ---- adb7                         rts
+
+
+
+
+               ; TIMER0 event rate = 4 times the UART baud rate
+               ;
+               ; R7    TX bit counter
+               ; R6    TX shift register
+               ; R5    RX bit counter / RX new head index / RX timeout counter
+               ; R4    RX shift register
+               ; R3    RX data storage pointer (last word)
+               ; R2    RX idle counter
+               ; R1    Temporary variables
+               ; R0    Temporary variables (special functionality)
+
+
+               ; Flags set for each RX byte
+               .define BV_UART_RX_TIMEOUT                      0x0800
+               .define BV_UART_RX_OVERFLOW                     0x0400
+               .define BV_UART_RX_BREAK                        0x0200
+               .define BV_UART_RX_FRAMING_ERROR                0x0100
+
+               ; Alert-generating events
+               .define BV_UART_ALERT_RX_FIFO_ABOVE_THR         0x0001
+               .define BV_UART_ALERT_RX_BYTE_TIMEOUT           0x0002
+               .define BV_UART_ALERT_RX_BREAK_OR_FRAMING_ERROR 0x0004
+               .define BV_UART_ALERT_TX_FIFO_BELOW_THR         0x0008
+
+
+
+               UartEmulator:
+                                       ; Disable RX idle timeout
+0113 ---- 5000                         ld          R5, #0
+
+                                       ; Set the default number of required idle half-bits before enabling RX
+0114 ---- 2879                         ld          R2, [#uartTaskName/cfg/rxEnableReqIdleCount]
+
+                                       ; Initialize state machine (function pointers)
+0115 ---- 012d                         ld          R0, #UartEmulator/txIdle
+0116 ---- 0e29                         st          R0, [#uartTxFptr]
+0117 ---- 0156                         ld          R0, #UartEmulator/rxIdle
+0118 ---- 0e2a                         st          R0, [#uartRxFptr]
+0119 ---- 01c7                         ld          R0, #UartEmulator/sysCmd
+011a ---- 0e2b                         st          R0, [#uartSysFptr]
+011b 8602 0212                         ld          R0, #UartEmulator/txCheckRxStartDisabled
+011d ---- 0e2c                         st          R0, [#uartTxCheckRxStartFptr]
+011e 8602 021d                         ld          R0, #UartEmulator/sysCheckRxStartDisabled
+0120 ---- 0e2d                         st          R0, [#uartSysCheckRxStartFptr]
+
+
+
+
+               /mainLoop:
+                                       ; 0: RX (oversampling)
+0121 ---- 0a2a                         ld          R0, [#uartRxFptr]
+0122 ---- cdb1                         wev1        #WEVSEL_TIMER0
+0123 ---- 9db7                         jsr         R0
+
+                                       ; 1: TX
+0124 ---- 0a2c                         ld          R0, [#uartTxCheckRxStartFptr]
+0125 ---- cdb1                         wev1        #WEVSEL_TIMER0
+0126 ---- 9db7                         jsr         R0
+
+                                       ; 2: RX (oversampling)
+0127 ---- 0a2a                         ld          R0, [#uartRxFptr]
+0128 ---- cdb1                         wev1        #WEVSEL_TIMER0
+0129 ---- 9db7                         jsr         R0
+
+                                       ; 3: System (jumps to the start of the main loop or returns)
+012a ---- 0a2d                         ld          R0, [#uartSysCheckRxStartFptr]
+012b ---- cdb1                         wev1        #WEVSEL_TIMER0
+012c ---- 8db7                         jmp         R0
+
+
+
+
+
+
+               ;; TX IDLE
+               /txIdle:
+                                       ; Start transmission of a new byte?
+012d ---- 6902                         ld          R6, [#uartTaskName/state/txHead]
+012e ---- 1903                         ld          R1, [#uartTaskName/state/txTail]
+012f ---- 9d2e                         cmp         R1, R6
+0130 ---- b604                         beq         /txIdleNoStart
+               /txIdleCheckStartDelay:
+                                           ; Load the data byte (LSB) and delay (MSB) into the shift register
+0131 ---- 987a                             add         R1, #uartTaskName/input/pTxBuffer
+0132 ---- ef09                             ld          R6, [R1]
+
+                                           ; Proceed to "txStartBit" next
+0133 ---- 1136                             ld          R1, #/txStartBit
+0134 ---- 1e29                             st          R1, [#uartTxFptr]
+               /txIdleNoStart:
+                                       ; Done
+0135 ---- adb7                         rts
+
+
+
+
+               ;; TX START BIT
+               /txStartBit:
+                                       ; Delay the transmission? (remaining delay is in MSB of the shift register)
+0136 8600 eaff                         cmp         R6, #0x00FF
+0138 ---- 9e03                         bleu        /txStartBitNoDelay
+
+                                           ; Decrement the delay
+0139 86ff e800                             add         R6, #0xFF00
+013b ---- 8e04                         bra         /txStartBitDone
+
+                                       ; Otherwise ...
+               /txStartBitNoDelay:
+                                           ; Transmit the start bit
+013c ---- 560f                             iobclr      #(AUXIO_UART_TX & 0x7), [#(IOP_AIODIO0_GPIODOUT + (AUXIO_UART_TX >> 3))]
+
+                                           ; Initialize the bit counter used by "txDataBit"
+013d ---- 7008                             ld          R7, #8
+
+                                           ; Proceed to "txDataBit" next
+013e ---- 1141                             ld          R1, #/txDataBit
+013f ---- 1e29                             st          R1, [#uartTxFptr]
+               /txStartBitDone:
+                                       ; Done
+0140 ---- adb7                         rts
+
+
+
+
+               ;; TX DATA BIT
+               /txDataBit:
+                                       ; Transmit lsb of the shift register
+0141 ---- ec01                         tst         R6, #0x0001
+0142 ---- be02                         bnz         /txDataBitOutput1
+
+                                           ; Transmit logical 0
+0143 ---- 560f                             iobclr      #(AUXIO_UART_TX & 0x7), [#(IOP_AIODIO0_GPIODOUT + (AUXIO_UART_TX >> 3))]
+0144 ---- 8e01                         bra         /txDataBitOutputDone
+               /txDataBitOutput1:
+                                           ; Transmit logical 1
+0145 ---- 760f                             iobset      #(AUXIO_UART_TX & 0x7), [#(IOP_AIODIO0_GPIODOUT + (AUXIO_UART_TX >> 3))]
+               /txDataBitOutputDone:
+                                       ; Update the shift register
+0146 ---- eda9                         lsr         R6, #1
+
+                                       ; Proceed to "txStopBit" next when the msb has been transmitted (counter in R7
+                                       ; goes from 8 to 0)
+0147 ---- f8ff                         add         R7, #-1
+0148 ---- be02                         bnz         /txDataBitNotMsb
+0149 ---- 114c                             ld          R1, #/txStopBit
+014a ---- 1e29                             st          R1, [#uartTxFptr]
+               /txDataBitNotMsb:
+                                       ; Done
+014b ---- adb7                         rts
+
+
+
+
+               ;; TX STOP BIT
+               /txStopBit:
+                                       ; Proceed to "txIdle" next, for a second stop bit
+014c ---- 112d                         ld          R1, #/txIdle
+014d ---- 1e29                         st          R1, [#uartTxFptr]
+
+                                       ; Transmit the stop bit
+014e ---- 760f                         iobset      #(AUXIO_UART_TX & 0x7), [#(IOP_AIODIO0_GPIODOUT + (AUXIO_UART_TX >> 3))]
+
+                                       ; Move on the TX FIFO tail index, wrapping at UART_TX_BUFFER_SIZE
+014f ---- 1903                         ld          R1, [#uartTaskName/state/txTail]
+0150 ---- 9801                         add         R1, #1
+0151 ---- 9a40                         cmp         R1, #UART_TX_BUFFER_SIZE
+0152 ---- ae01                         bltu        /txStopBitFifoNoWrap
+0153 ---- 1000                             ld          R1, #0
+0154 ---- 1d03 /txStopBitFifoNoWrap:   st          R1, [#uartTaskName/state/txTail]
+
+                                       ; Done
+0155 ---- adb7                         rts
+
+
+
+
+
+
+               /rxIdle:
+                                       ; If the RX timeout counter is active ...
+0156 ---- da00                         cmp         R5, #0
+0157 ---- 9e09                         bleu        /rxIdleNoTimeout
+
+                                           ; Decrement it and, and if timeout now ...
+0158 ---- d8ff                             add         R5, #-1
+0159 ---- be07                             bnz         /rxIdleNoTimeout
+
+                                               ; Set the TIMEOUT flag for the last received byte
+015a 8608 c200                                 or          R4, #BV_UART_RX_TIMEOUT
+015c ---- cf2b                                 st          R4, [R3]
+
+                                               ; Set the TIMEOUT event for ALERT interrupt generation
+015d ---- 18fa                                 ld          R1, [#uartTaskName/state/alertBacklog]
+015e ---- 9202                                 or          R1, #BV_UART_ALERT_RX_BYTE_TIMEOUT
+015f ---- 1cfa                                 st          R1, [#uartTaskName/state/alertBacklog]
+
+                                               ; Done
+0160 ---- adb7                                 rts
+
+               /rxIdleNoTimeout:
+                                       ; If RX should be enabled ...
+0161 ---- 08fe                         ld          R0, [#uartTaskName/state/rxEnable]
+0162 ---- 18ff                         ld          R1, [#uartTaskName/state/rxEnabled]
+0163 ---- 8d29                         cmp         R0, R1
+0164 ---- 9e0e                         bleu        /rxIdleNoRxEnable
+
+                                           ; If the required idle period has not yet expired ...
+0165 ---- aa00                             cmp         R2, #0
+0166 ---- b605                             beq         /rxIdleRxEnable
+
+                                               ; Decrement the countdown
+0167 ---- a8ff                                 add         R2, #-1
+
+                                               ; If the RX line is not idle now ...
+0168 ---- 3513                                 iobtst      #(AUXIO_UART_RX & 0x7), [#(IOP_AIODIO0_GPIODIN + (AUXIO_UART_RX >> 3))]
+0169 ---- ae01                                 biob1       /rxIdleRxEnableStillIdle
+
+                                                   ; Reset the countdown
+016a ---- 2879                                     ld          R2, [#uartTaskName/cfg/rxEnableReqIdleCount]
+016b ---- adb7 /rxIdleRxEnableStillIdle:   rts
+
+                                           ; Otherwise, if the required idle period has expired ...
+               /rxIdleRxEnable:
+                                               ; Enable start-bit detection
+016c 8602 1215                                 ld          R1, #/txCheckRxStartEnabled
+016e ---- 1e2c                                 st          R1, [#uartTxCheckRxStartFptr]
+016f 8602 1220                                 ld          R1, #/sysCheckRxStartEnabled
+0171 ---- 1e2d                                 st          R1, [#uartSysCheckRxStartFptr]
+
+                                               ; Indicate that RX is enabled
+0172 ---- 0cff                                 st          R0, [#uartTaskName/state/rxEnabled]
+               /rxIdleNoRxEnable:
+                                       ; Done
+0173 ---- adb7                         rts
+
+
+
+
+               /rxDisable:
+                                       ; Disable start-bit detection
+0174 8602 0212                         ld          R0, #/txCheckRxStartDisabled
+0176 ---- 0e2c                         st          R0, [#uartTxCheckRxStartFptr]
+0177 8602 021d                         ld          R0, #/sysCheckRxStartDisabled
+0179 ---- 0e2d                         st          R0, [#uartSysCheckRxStartFptr]
+
+                                       ; Do "rxIdle" next
+017a ---- 0156                         ld          R0, #/rxIdle
+017b ---- 0e2a                         st          R0, [#uartRxFptr]
+
+                                       ; Disable the RX timeout
+017c ---- 5000                         ld          R5, #0
+
+                                       ; Indicate that RX is disabled
+017d ---- 5cff                         st          R5, [#uartTaskName/state/rxEnabled]
+
+                                       ; Reset the required number of idle periods before allowing RX to be enabled
+017e ---- 2879                         ld          R2, [#uartTaskName/cfg/rxEnableReqIdleCount]
+
+                                       ; Done
+017f ---- adb7                         rts
+
+
+
+
+               /rxStartBit:
+                                       ; Stop start bit detection
+0180 8602 1212                         ld          R1, #/txCheckRxStartDisabled
+0182 ---- 1e2c                         st          R1, [#uartTxCheckRxStartFptr]
+0183 8602 121d                         ld          R1, #/sysCheckRxStartDisabled
+0185 ---- 1e2d                         st          R1, [#uartSysCheckRxStartFptr]
+
+                                       ; Initialize the bit counter used by "rxDataBit"
+0186 ---- 5008                         ld          R5, #8
+
+                                       ; Clear the shift register
+0187 ---- 4000                         ld          R4, #0x0000
+
+                                       ; Fetch the pointer to RX head
+0188 ---- 3900                         ld          R3, [#uartTaskName/state/rxHead]
+0189 8600 b8ba                         add         R3, #uartTaskName/output/pRxBuffer
+
+                                       ; Proceed to "preRxDataBit" next
+018b ---- 118e                         ld          R1, #/preRxDataBit
+018c ---- 1e2a                         st          R1, [#uartRxFptr]
+
+                                       ; Done
+018d ---- adb7                         rts
+
+
+
+
+               /preRxDataBit:
+                                       ; Update the shift register
+018e ---- cda9                         lsr         R4, #1
+
+                                       ; Proceed to "rxDataBit" next
+018f ---- 1192                         ld          R1, #/rxDataBit
+0190 ---- 1e2a                         st          R1, [#uartRxFptr]
+
+                                       ; Done
+0191 ---- adb7                         rts
+
+
+
+
+               /rxDataBit:
+                                       ; Shift in a 0 or a 1 into the shift register
+0192 ---- fd47                         nop
+0193 ---- 3513                         iobtst      #(AUXIO_UART_RX & 0x7), [#(IOP_AIODIO0_GPIODIN + (AUXIO_UART_RX >> 3))]
+0194 ---- a601                         biob0       /rxDataBitZero
+0195 ---- c280                             or          R4, #0x0080
+               /rxDataBitZero:
+                                       ; If msb has been received, proceed to "preRxStopBit" next, otherwise "preRxDataBit"
+0196 ---- d8ff                         add         R5, #-1
+0197 ---- be02                         bnz         /rxDataBitNotDone
+0198 ---- 119d                             ld          R1, #/preRxStopBit
+0199 ---- 8e01                         bra         /rxDataBitDone
+019a ---- 118e /rxDataBitNotDone:          ld          R1, #/preRxDataBit
+019b ---- 1e2a /rxDataBitDone:         st          R1, [#uartRxFptr]
+
+                                       ; Done
+019c ---- adb7                         rts
+
+
+
+
+               /preRxStopBit:
+                                       ; Calculate the new RX FIFO head index, wrapping at UART_RX_BUFFER_SIZE
+019d ---- 5900                         ld          R5, [#uartTaskName/state/rxHead]
+019e ---- d801                         add         R5, #1
+019f ---- da40                         cmp         R5, #UART_RX_BUFFER_SIZE
+01a0 ---- ae01                         bltu        /rxStopBitFifoNoWrap
+01a1 ---- 5000                             ld          R5, #0
+               /rxStopBitFifoNoWrap:
+                                       ; Proceed to "rxStopBit" next
+01a2 ---- 01a5                         ld          R0, #/rxStopBit
+01a3 ---- 0e2a                         st          R0, [#uartRxFptr]
+
+                                       ; Done
+01a4 ---- adb7                         rts
+
+
+
+
+               /rxStopBit:
+                                       ; If not a valid stop bit ...
+01a5 ---- fd47                         nop
+01a6 ---- 3513                         iobtst      #(AUXIO_UART_RX & 0x7), [#(IOP_AIODIO0_GPIODIN + (AUXIO_UART_RX >> 3))]
+01a7 ---- ae0b                         biob1       /rxStopBitValid
+
+                                           ; Depending on the received byte ...
+01a8 ---- ccff                             tst         R4, #0xFF
+01a9 ---- be03                             bnz         /rxStopBitFramingError
+               /rxStopBitBreak:
+                                               ; If 0x00, indicate "break"
+01aa 8602 c200                                 or          R4, #BV_UART_RX_BREAK
+01ac ---- 8e02                             bra         /rxStopBitNotFramingError
+               /rxStopBitFramingError:
+                                               ; Otherwise, indicate framing error
+01ad 8601 c200                                 or          R4, #BV_UART_RX_FRAMING_ERROR
+               /rxStopBitNotFramingError:
+
+                                           ; Set the BREAK OR FRAMING ERROR event for ALERT interrupt generation
+01af ---- 18fa                             ld          R1, [#uartTaskName/state/alertBacklog]
+01b0 ---- 9204                             or          R1, #BV_UART_ALERT_RX_BREAK_OR_FRAMING_ERROR
+01b1 ---- 1cfa                             st          R1, [#uartTaskName/state/alertBacklog]
+
+                                           ; Bail out and come back later
+01b2 ---- adb7                             rts
+               /rxStopBitValid:
+                                       ; Proceed to "rxIdle" next
+01b3 ---- 0156                         ld          R0, #/rxIdle
+01b4 ---- 0e2a                         st          R0, [#uartRxFptr]
+
+                                       ; Re-enable start-bit detection
+01b5 8602 0215                         ld          R0, #/txCheckRxStartEnabled
+01b7 ---- 0e2c                         st          R0, [#uartTxCheckRxStartFptr]
+01b8 8602 0220                         ld          R0, #/sysCheckRxStartEnabled
+01ba ---- 0e2d                         st          R0, [#uartSysCheckRxStartFptr]
+
+                                       ; If the updated head index equals the tail index ...
+01bb ---- 0901                         ld          R0, [#uartTaskName/state/rxTail]
+01bc ---- dd28                         cmp         R5, R0
+01bd ---- be05                         bneq        /rxStopBitNotOverflow
+
+                                           ; Indicate overflow
+01be 8604 c200                             or          R4, #BV_UART_RX_OVERFLOW
+
+                                           ; Store the received byte
+01c0 ---- cf2b                             st          R4, [R3]
+
+                                           ; Initialize the timeout counter, which will be used shortly in "rxIdle"
+01c1 ---- 5878                             ld          R5, [#uartTaskName/cfg/rxByteTimeout]
+
+                                           ; Bail out without updating the head index
+01c2 ---- adb7                             rts
+               /rxStopBitNotOverflow:
+                                       ; Store the received byte
+01c3 ---- cf2b                         st          R4, [R3]
+
+                                       ; Update the RX head index
+01c4 ---- 5d00                         st          R5, [#uartTaskName/state/rxHead]
+
+                                       ; Initialize the timeout counter, which will be used shortly in "rxIdle"
+01c5 ---- 5878                         ld          R5, [#uartTaskName/cfg/rxByteTimeout]
+
+                                       ; Done
+01c6 ---- adb7                         rts
+
+
+
+
+
+
+               /sysCmd:
+                                       ; Exit the UART emulator?
+01c7 ---- 18fd                         ld          R1, [#uartTaskName/state/exit]
+01c8 ---- 9a00                         cmp         R1, #0
+01c9 ---- b601                         beq         /sysCmdNoExit
+01ca ---- adb7                             rts
+               /sysCmdNoExit:
+               /sysCmdRxDisable:
+                                       ; Disable RX?
+01cb ---- 08fe                         ld          R0, [#uartTaskName/state/rxEnable]
+01cc ---- 18ff                         ld          R1, [#uartTaskName/state/rxEnabled]
+01cd ---- 8d29                         cmp         R0, R1
+01ce ---- a602                         bgeu        /sysCmdNoRxDisable
+
+                                           ; Do "rxDisable" in the next upcoming RX state
+01cf ---- 0174                             ld          R0, #/rxDisable
+01d0 ---- 0e2a                             st          R0, [#uartRxFptr]
+               /sysCmdNoRxDisable:
+                                       ; Do ALERT mask update next
+01d1 ---- 01d4                         ld          R0, #/sysAlertMaskUpdate
+01d2 ---- 0e2b                         st          R0, [#uartSysFptr]
+
+                                       ; Keep on executing from the start of the main loop
+01d3 ---- 0521                         jmp         /mainLoop
+
+
+
+
+               /sysAlertMaskUpdate:
+                                       ; Update the ALERT mask
+01d4 ---- 0875                         ld          R0, [#uartTaskName/cfg/alertMask]
+01d5 ---- 0cfc                         st          R0, [#uartTaskName/state/alertMask]
+
+                                       ; Clear FIFO flags and currently disabled events from the backlog
+01d6 ---- 18fa                         ld          R1, [#uartTaskName/state/alertBacklog]
+01d7 ---- 9d00                         and         R1, R0
+01d8 ---- 9006                         and         R1, #((~(BV_UART_ALERT_RX_FIFO_ABOVE_THR | BV_UART_ALERT_TX_FIFO_BELOW_THR)) & 0xF)
+01d9 ---- 1cfa                         st          R1, [#uartTaskName/state/alertBacklog]
+
+                                       ; Do RX FIFO event generation next
+01da ---- 01dd                         ld          R0, #/sysAlertCheckRxFifo0
+01db ---- 0e2b                         st          R0, [#uartSysFptr]
+
+                                       ; Keep on executing from the start of the main loop
+01dc ---- 0521                         jmp         /mainLoop
+
+
+
+
+               /sysAlertCheckRxFifo0:
+                                       ; Calculate the number of bytes currently in the RX FIFO
+01dd ---- 0900                         ld          R0, [#uartTaskName/state/rxHead]
+01de ---- 1901                         ld          R1, [#uartTaskName/state/rxTail]
+01df ---- 8d19                         sub         R0, R1
+01e0 ---- d601                         bpos        /sysAlertsRxCountNoWrap
+01e1 ---- 8840                             add         R0, #UART_RX_BUFFER_SIZE
+               /sysAlertsRxCountNoWrap:
+                                       ; There is not sufficient time to compare the FIFO count with the threshold and
+                                       ; set flags, so we store the count temporarily in RAM
+01e2 ---- 0e28                         st          R0, [#uartRxTxFifoCount]
+
+                                       ; Continue RX FIFO event generation next
+01e3 ---- 01e6                         ld          R0, #/sysAlertCheckRxFifo1
+01e4 ---- 0e2b                         st          R0, [#uartSysFptr]
+
+                                       ; Keep on executing from the start of the main loop
+01e5 ---- 0521                         jmp         /mainLoop
+
+
+
+
+               /sysAlertCheckRxFifo1:
+                                       ; If the RX FIFO is at or above the specified threshold ...
+01e6 ---- 0a28                         ld          R0, [#uartRxTxFifoCount]
+01e7 ---- 1876                         ld          R1, [#uartTaskName/cfg/alertRxFifoThr]
+01e8 ---- 8d29                         cmp         R0, R1
+01e9 ---- ae03                         bltu        /sysAlertsRxCountNoEvent
+
+                                           ; Generate RX FIFO ABOVE THR event
+01ea ---- 08fa                            ld          R0, [#uartTaskName/state/alertBacklog]
+01eb ---- 8201                            or          R0, #BV_UART_ALERT_RX_FIFO_ABOVE_THR
+01ec ---- 0cfa                            st          R0, [#uartTaskName/state/alertBacklog]
+               /sysAlertsRxCountNoEvent:
+                                       ; Do TX FIFO event generation next
+01ed ---- 01f0                         ld          R0, #/sysAlertCheckTxFifo0
+01ee ---- 0e2b                         st          R0, [#uartSysFptr]
+
+                                       ; Keep on executing from the start of the main loop
+01ef ---- 0521                         jmp         /mainLoop
+
+
+
+
+               /sysAlertCheckTxFifo0:
+                                       ; Calculate the number of bytes currently in the TX FIFO
+01f0 ---- 0902                         ld          R0, [#uartTaskName/state/txHead]
+01f1 ---- 1903                         ld          R1, [#uartTaskName/state/txTail]
+01f2 ---- 8d19                         sub         R0, R1
+01f3 ---- d601                         bpos        /sysAlertsTxCountNoWrap
+01f4 ---- 8840                             add         R0, #UART_TX_BUFFER_SIZE
+               /sysAlertsTxCountNoWrap:
+                                       ; There is not sufficient time to compare the FIFO count with the threshold and
+                                       ; set flags, so we store the count temporarily in RAM
+01f5 ---- 0e28                         st          R0, [#uartRxTxFifoCount]
+
+                                       ; Continue TX FIFO event generation next
+01f6 ---- 01f9                         ld          R0, #/sysAlertCheckTxFifo1
+01f7 ---- 0e2b                         st          R0, [#uartSysFptr]
+
+                                       ; Keep on executing from the start of the main loop
+01f8 ---- 0521                         jmp         /mainLoop
+
+
+
+
+               /sysAlertCheckTxFifo1:
+                                       ; If the TX FIFO is at or below the specified threshold ...
+01f9 ---- 0a28                         ld          R0, [#uartRxTxFifoCount]
+01fa ---- 1877                         ld          R1, [#uartTaskName/cfg/alertTxFifoThr]
+01fb ---- 8d29                         cmp         R0, R1
+01fc ---- 9603                         bgtu        /sysAlertsTxCountNoEvent
+
+                                           ; Generate TX FIFO BELOW THR event
+01fd ---- 08fa                             ld          R0, [#uartTaskName/state/alertBacklog]
+01fe ---- 8208                             or          R0, #BV_UART_ALERT_TX_FIFO_BELOW_THR
+01ff ---- 0cfa                             st          R0, [#uartTaskName/state/alertBacklog]
+               /sysAlertsTxCountNoEvent:
+                                       ; Do ALERT interrupt generation next
+0200 8602 0204                         ld          R0, #/sysAlertGen
+0202 ---- 0e2b                         st          R0, [#uartSysFptr]
+
+                                       ; Keep on executing from the start of the main loop
+0203 ---- 0521                         jmp         /mainLoop
+
+
+
+
+               /sysAlertGen:
+                                       ; If the previous events have been handled by the application ...
+0204 ---- 08fb                         ld          R0, [#uartTaskName/state/alertEvents]
+0205 ---- 8a00                         cmp         R0, #0x0000
+0206 ---- be08                         bneq        /sysAlertsNoGen
+
+                                           ; Mask out the disabled events from the backlog
+0207 ---- 08fa                             ld          R0, [#uartTaskName/state/alertBacklog]
+0208 ---- 18fc                             ld          R1, [#uartTaskName/state/alertMask]
+0209 ---- 8d01                             and         R0, R1
+
+                                           ; If there are any enabled events in the backlog ...
+020a ---- b604                             bz          /sysAlertsNoGen
+
+                                               ; Generate alert interrupt
+020b ---- 0cfb                                 st          R0, [#uartTaskName/state/alertEvents]
+020c ---- 652d                                 iobset      #IOB_EVCTL_SWEV_ALERT, [#IOP_EVCTL_SWEVSET]
+
+                                               ; Clear the backlog
+020d ---- 0000                                 ld          R0, #0x0000
+020e ---- 0cfa                                 st          R0, [#uartTaskName/state/alertBacklog]
+               /sysAlertsNoGen:
+                                       ; Do system commands next
+020f ---- 01c7                         ld          R0, #/sysCmd
+0210 ---- 0e2b                         st          R0, [#uartSysFptr]
+
+                                       ; Keep on executing from the start of the main loop
+0211 ---- 0521                         jmp         /mainLoop
+
+
+
+
+
+
+               /txCheckRxStartDisabled:
+                                       ; RX is already active, or checking is disabled
+0212 ---- 0a29                         ld          R0, [#uartTxFptr]
+0213 ---- fd47                         nop
+0214 ---- 8e03                         bra         /txCheckRxStartIdle
+               /txCheckRxStartEnabled:
+                                       ; RX is enabled and currently idle, so check for start bit
+0215 ---- 0a29                         ld          R0, [#uartTxFptr]
+0216 ---- 3513                         iobtst      #(AUXIO_UART_RX & 0x7), [#(IOP_AIODIO0_GPIODIN + (AUXIO_UART_RX >> 3))]
+0217 ---- a602                         biob0       /txCheckRxStartFound
+0218 ---- fd47 /txCheckRxStartIdle:        nop
+0219 ---- 8e02                         bra         /txCheckRxStartDone
+021a ---- 1180 /txCheckRxStartFound:       ld          R1, #/rxStartBit
+021b ---- 1e2a                             st          R1, [#uartRxFptr]
+               /txCheckRxStartDone:
+                                       ; Jump to the TX function
+021c ---- 8db7                         jmp         R0
+
+
+
+
+               /sysCheckRxStartDisabled:
+                                       ; RX is already active, or checking is disabled
+021d ---- 0a2b                         ld          R0, [#uartSysFptr]
+021e ---- fd47                         nop
+021f ---- 8e03                         bra         /sysCheckRxStartIdle
+               /sysCheckRxStartEnabled:
+                                       ; RX is enabled and currently idle, so check for start bit
+0220 ---- 0a2b                         ld          R0, [#uartSysFptr]
+0221 ---- 3513                         iobtst      #(AUXIO_UART_RX & 0x7), [#(IOP_AIODIO0_GPIODIN + (AUXIO_UART_RX >> 3))]
+0222 ---- a602                         biob0       /sysCheckRxStartFound
+0223 ---- fd47 /sysCheckRxStartIdle:       nop
+0224 ---- 8e02                         bra         /sysCheckRxStartDone
+0225 ---- 1180 /sysCheckRxStartFound:      ld          R1, #/rxStartBit
+0226 ---- 1e2a                             st          R1, [#uartRxFptr]
+               /sysCheckRxStartDone:
+                                       ; Jump to the system function
+0227 ---- 8db7                         jmp         R0
+
+
+
+
+
+
+0228 ---- 0000 uartRxTxFifoCount:      dw          #0
+
+0229 ---- 0000 uartTxFptr:             dw          #0
+022a ---- 0000 uartRxFptr:             dw          #0
+022b ---- 0000 uartSysFptr:            dw          #0
+
+               uartTxCheckRxStartFptr:
+022c ---- 0000                         dw          #0
+               uartSysCheckRxStartFptr:
+022d ---- 0000                         dw          #0
+               .segment end "Procedure Library"
+
+
+; Generated by HP-NOVAMEDIKACL at 2026-04-18 11:28:11.395
