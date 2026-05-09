@@ -149,8 +149,9 @@ static void scTaskAlertCallback(void);
 #define SBP_TASK_PRIORITY                     1
 
 #ifndef SBP_TASK_STACK_SIZE
-#define SBP_TASK_STACK_SIZE                   644
+#define SBP_TASK_STACK_SIZE                   1024
 #endif
+
 
 // Application events
 #define SBP_STATE_CHANGE_EVT                  0x0001
@@ -1146,6 +1147,9 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
         uint8_t advertReEnable = TRUE;
 
         Util_stopClock(&periodicClock);
+
+        scifUartStopEmulator();
+
         attRsp_freeAttRsp(bleNotConnected);
 
         // Clear remaining lines
@@ -1157,6 +1161,10 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
       break;
 
     case GAPROLE_WAITING_AFTER_TIMEOUT:
+
+      Util_stopClock(&periodicClock); // <-- 2. AGGIUNGI QUESTA: Ferma il timer anche in caso di timeout
+      scifUartStopEmulator();         // <-- 3. AGGIUNGI QUESTA: Spegni il sensore
+
       attRsp_freeAttRsp(bleNotConnected);
 
       Display_print0(dispHandle, 2, 0, "Timed Out");
@@ -1245,17 +1253,51 @@ static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramID)
  */
 static void SimplePeripheral_performPeriodicTask(void)
 {
-  uint8_t valueToCopy;
+  // 1. Sveglia il Sensor Controller e accende il sensore
+  scifExecuteTasksOnceNbl(1 << SCIF_UART_EMULATOR_TASK_ID);
 
-  // Call to retrieve the value of the third characteristic in the profile
-  if (SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, &valueToCopy) == SUCCESS)
-  {
-    // Call to set that value of the fourth characteristic in the profile.
-    // Note that if notifications of the fourth characteristic have been
-    // enabled by a GATT client device, then a notification will be sent
-    // every time this function is called.
-    SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, sizeof(uint8_t),
-                               &valueToCopy);
+  // 2. Configura l'Emulatore UART a 9600 baud
+  scifUartSetBaudRate(9600);
+  scifUartSetRxEnableReqIdleCount(1);
+  scifUartRxEnable(1);
+
+  // 3. Il sensore impiega 100ms per accendersi, diamogli 200ms di tempo totale
+  // mettendo l'ARM in sleep per risparmiare energia.
+  Task_sleep(200000 / Clock_tickPeriod);
+
+  // 4. Controlla se sono arrivati i 4 byte nella FIFO
+  if (scifUartGetRxFifoCount() >= 4) {
+      
+      uint8_t d0 = (uint8_t)scifUartRxGetChar();
+      
+      // Verifica l'Header (0xFF)
+      if (d0 == 0xFF) { 
+          uint8_t d1 = (uint8_t)scifUartRxGetChar();
+          uint8_t d2 = (uint8_t)scifUartRxGetChar();
+          uint8_t d3 = (uint8_t)scifUartRxGetChar();
+
+          // Verifica il Checksum
+          if (((d0 + d1 + d2) & 0xFF) == d3) { 
+              
+              // Calcola distanza in millimetri
+              uint16_t distanza_mm = (d1 << 8) | d2;
+              
+              if (distanza_mm <= 4500) {
+                  // Invia il dato a 16 bit tramite Bluetooth (aggiorna la Characteristic 1)
+                  SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, sizeof(uint16_t), &distanza_mm);
+              }
+          }
+      } else {
+          // Fuori sincrono. Svuota la FIFO.
+          while(scifUartGetRxFifoCount() > 0) {
+              scifUartRxGetChar();
+          }
+      }
+  } else {
+      // Dati incompleti. Svuota la FIFO.
+      while(scifUartGetRxFifoCount() > 0) {
+          scifUartRxGetChar();
+      }
   }
 
   // --- LETTURA SENSORE E INVIO BLUETOOTH ---

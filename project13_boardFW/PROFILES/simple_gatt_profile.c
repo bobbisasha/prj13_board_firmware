@@ -134,11 +134,11 @@ static CONST gattAttrType_t simpleProfileService = { ATT_BT_UUID_SIZE, simplePro
 // Simple Profile Characteristic 1 Properties
 static uint8 simpleProfileChar1Props = GATT_PROP_READ | GATT_PROP_WRITE;
 
-// Characteristic 1 Value
-static uint8 simpleProfileChar1 = 0;
+// Characteristic 1 Value (Array di 2 byte per i millimetri)
+static uint8 simpleProfileChar1[2] = {0, 0};
 
 // Simple Profile Characteristic 1 User Description
-static uint8 simpleProfileChar1UserDesp[17] = "Characteristic 1";
+static uint8 simpleProfileChar1UserDesp[17] = "Distance (mm)";
 
 
 // Simple Profile Characteristic 2 Properties
@@ -213,7 +213,7 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
         { ATT_BT_UUID_SIZE, simpleProfilechar1UUID },
         GATT_PERMIT_READ | GATT_PERMIT_WRITE,
         0,
-        &simpleProfileChar1
+        simpleProfileChar1
       },
 
       // Characteristic 1 User Description
@@ -375,6 +375,7 @@ CONST gattServiceCBs_t simpleProfileCBs =
  *                     contain more than one service.
  *
  * @return  Success or Failure
+ 
  */
 bStatus_t SimpleProfile_AddService( uint32 services )
 {
@@ -451,10 +452,11 @@ bStatus_t SimpleProfile_SetParameter( uint8 param, uint8 len, void *value )
   switch ( param )
   {
     case SIMPLEPROFILE_CHAR1:
-      if ( len == sizeof ( uint8 ) )
+      if ( len == 2 )
       {
-        simpleProfileChar1 = *((uint8*)value);
+        VOID memcpy(simpleProfileChar1, value, 2); // <--- CORREZIONE
       }
+      
       else
       {
         ret = bleInvalidRange;
@@ -537,7 +539,7 @@ bStatus_t SimpleProfile_GetParameter( uint8 param, void *value )
   switch ( param )
   {
     case SIMPLEPROFILE_CHAR1:
-      *((uint8*)value) = simpleProfileChar1;
+      VOID memcpy(value, simpleProfileChar1, 2); // <-- Copia i 2 byte in uscita      
       break;
 
     case SIMPLEPROFILE_CHAR2:
@@ -608,6 +610,10 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle,
       // characteristic 4 does not have read permissions, but because it
       //   can be sent as a notification, it is included here
       case SIMPLEPROFILE_CHAR1_UUID:
+         *pLen = 2; // <-- La Char 1 ora è lunga 2 byte
+        VOID memcpy(pValue, pAttr->pValue, 2);
+        break;
+        
       case SIMPLEPROFILE_CHAR2_UUID:
       case SIMPLEPROFILE_CHAR4_UUID:
         *pLen = 1;
@@ -665,36 +671,31 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
     switch ( uuid )
     {
       case SIMPLEPROFILE_CHAR1_UUID:
-      case SIMPLEPROFILE_CHAR3_UUID:
-
-        //Validate the value
-        // Make sure it's not a blob oper
-        if ( offset == 0 )
-        {
-          if ( len != 1 )
-          {
+        if ( offset == 0 ) {
+          if ( len != 2 ) { // Controllo lunghezza a 2 byte
             status = ATT_ERR_INVALID_VALUE_SIZE;
           }
-        }
-        else
-        {
+        } else {
           status = ATT_ERR_ATTR_NOT_LONG;
         }
+        if ( status == SUCCESS ) {
+          VOID memcpy(pAttr->pValue, pValue, 2); // Copia i 2 byte
+          notifyApp = SIMPLEPROFILE_CHAR1;
+        }
+        break;
 
-        //Write the value
-        if ( status == SUCCESS )
-        {
+      case SIMPLEPROFILE_CHAR3_UUID:
+        if ( offset == 0 ) {
+          if ( len != 1 ) {
+            status = ATT_ERR_INVALID_VALUE_SIZE;
+          }
+        } else {
+          status = ATT_ERR_ATTR_NOT_LONG;
+        }
+        if ( status == SUCCESS ) {
           uint8 *pCurValue = (uint8 *)pAttr->pValue;
           *pCurValue = pValue[0];
-
-          if( pAttr->pValue == &simpleProfileChar1 )
-          {
-            notifyApp = SIMPLEPROFILE_CHAR1;
-          }
-          else
-          {
-            notifyApp = SIMPLEPROFILE_CHAR3;
-          }
+          notifyApp = SIMPLEPROFILE_CHAR3;
         }
 
         break;
