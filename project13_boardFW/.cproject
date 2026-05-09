@@ -45,7 +45,6 @@
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_18.12.compilerID.DIAG_WRAP.1676433591" superClass="com.ti.ccstudio.buildDefinitions.TMS470_18.12.compilerID.DIAG_WRAP" value="com.ti.ccstudio.buildDefinitions.TMS470_18.12.compilerID.DIAG_WRAP.off" valueType="enumerated"/>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_18.12.compilerID.INCLUDE_PATH.2081666831" superClass="com.ti.ccstudio.buildDefinitions.TMS470_18.12.compilerID.INCLUDE_PATH" valueType="includePath">
-                                    <listOptionValue value="${COM_TI_SIMPLELINK_CC2640R2_SDK_INCLUDE_PATH}"/>
                                     <listOptionValue value="${PROJECT_ROOT}"/>
                                     <listOptionValue value="${PROJECT_LOC}/Application"/>
                                     <listOptionValue value="${PROJECT_LOC}/Startup"/>
@@ -73,6 +72,7 @@
                                     <listOptionValue value="${SRC_BLE_DIR}/services/src/sdata"/>
                                     <listOptionValue value="${SRC_BLE_DIR}/../../../source/ti/devices/cc26x0r2"/>
                                     <listOptionValue value="${CG_TOOL_ROOT}/include"/>
+                                    <listOptionValue value="C:/Users/asus/AppData/Roaming/SPB_Data/simplelink_cc2640r2_sdk_5_30_00_03/source"/>
                                 </option>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_18.12.compilerID.LITTLE_ENDIAN.1614757445" superClass="com.ti.ccstudio.buildDefinitions.TMS470_18.12.compilerID.LITTLE_ENDIAN" value="true" valueType="boolean"/>
                                 <option id="com.ti.ccstudio.buildDefinitions.TMS470_18.12.compilerID.CMD_FILE.1221957863" superClass="com.ti.ccstudio.buildDefinitions.TMS470_18.12.compilerID.CMD_FILE" valueType="stringList">
@@ -167,8 +167,51 @@
                             </tool>
                         </toolChain>
                     </folderInfo>
+                    <folderInfo id="com.ti.ccstudio.buildDefinitions.TMS470.Default.1443364596.Application" name="Application" resourcePath="Application">
+                        <toolChain id="com.ti.ccstudio.buildDefinitions.TMS470_18.12.exe.DebugToolchain.994655150" name="TI Build Tools" superClass="com.ti.ccstudio.buildDefinitions.TMS470_18.12.exe.DebugToolchain" unusedChildren="">
+                            <option id="com.ti.ccstudio.buildDefinitions.core.OPT_TAGS.913213605.717011942" superClass="com.ti.ccstudio.buildDefinitions.core.OPT_TAGS.913213605"/>
+                            <option id="com.ti.ccstudio.buildDefinitions.core.OPT_CODEGEN_VERSION.1012583443.638833449" superClass="com.ti.ccstudio.buildDefinitions.core.OPT_CODEGEN_VERSION.1012583443"/>
+                            <targetPlatform id="com.ti.ccstudio.buildDefinitions.TMS470_18.12.exe.targetPlatformDebug" name="Platform" superClass="com.ti.ccstudio.buildDefinitions.TMS470_18.12.exe.targetPlatformDebug"/>
+                            <tool id="com.ti.ccstudio.buildDefinitions.TMS470_18.12.exe.compilerDebug.249155913" name="Arm Compiler" superClass="com.ti.ccstudio.buildDefinitions.TMS470_18.12.exe.compilerDebug.1793685603">
+                                <option id="com.ti.ccstudio.buildDefinitions.TMS470_18.12.compilerID.INCLUDE_PATH.1735354039" superClass="com.ti.ccstudio.buildDefinitions.TMS470_18.12.compilerID.INCLUDE_PATH" valueType="includePath">
+                                    <listOptionValue value="${COM_TI_SIMPLELINK_CC2640R2_SDK_INCLUDE_PATH}"/>
+                                    <listOptionValue value="${PROJECT_ROOT}"/>
+                                    <listOptionValue value="${PROJECT_LOC}/Application"/>
+                                    <listOptionValue value="${PROJECT_LOC}/Startup"/>
+                                    <listOptionValue value="${PROJECT_LOC}/PROFILES"/>
+                                    <listOptionValue value="${PROJECT_LOC}/Include"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/controller/cc26xx_r2/inc"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/inc"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/rom"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/common/cc26xx"/>
+                                    <listOptionValue value="${EXAMPLE_BLE_ROOT}/src/app"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/icall/inc"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/profiles/dev_info"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/profiles/roles/cc26xx"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/profiles/roles"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/profiles/simple_profile/cc26xx"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/profiles/simple_profile"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/target"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/hal/src/target/_common"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/hal/src/target/_common/cc26xx"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/hal/src/inc"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/heapmgr"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/icall/src/inc"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/osal/src/inc"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/services/src/saddr"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/services/src/sdata"/>
+                                    <listOptionValue value="${SRC_BLE_DIR}/../../../source/ti/devices/cc26x0r2"/>
+                                    <listOptionValue value="${CG_TOOL_ROOT}/include"/>
+                                    <listOptionValue value="${COM_TI_SIMPLELINK_CC2640R2_SDK_INSTALL_DIR}/source"/>
+                                </option>
+                            </tool>
+                            <tool id="com.ti.ccstudio.buildDefinitions.TMS470_18.12.exe.linkerDebug.1647485090" name="Arm Linker" superClass="com.ti.ccstudio.buildDefinitions.TMS470_18.12.exe.linkerDebug.19327320"/>
+                            <tool id="com.ti.ccstudio.buildDefinitions.TMS470_18.12.hex.1317877350" name="Arm Hex Utility" superClass="com.ti.ccstudio.buildDefinitions.TMS470_18.12.hex.1035844061"/>
+                            <tool id="com.ti.rtsc.buildDefinitions.XDC_3.16.tool.1568786290" name="XDCtools" superClass="com.ti.rtsc.buildDefinitions.XDC_3.16.tool.819737879"/>
+                        </toolChain>
+                    </folderInfo>
                     <sourceEntries>
-                        <entry excluding="TOOLS/cc26xx_app.cmd|Startup/ccfg_app_ble_rcosc.c|Application/rcosc_calibration.h|Application/rcosc_calibration.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
+                        <entry excluding="TOOLS/src|TOOLS/cc26xx_app.cmd|Startup/ccfg_app_ble_rcosc.c|Application/rcosc_calibration.h|Application/rcosc_calibration.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
                     </sourceEntries>
                 </configuration>
             </storageModule>
@@ -345,7 +388,7 @@
                         </toolChain>
                     </folderInfo>
                     <sourceEntries>
-                        <entry excluding="TOOLS/cc26xx_app.cmd|Startup/ccfg_app_ble.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
+                        <entry excluding="TOOLS/src|TOOLS/cc26xx_app.cmd|Startup/ccfg_app_ble.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
                     </sourceEntries>
                 </configuration>
             </storageModule>

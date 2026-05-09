@@ -56,6 +56,9 @@
 #include <ti/sysbios/knl/Queue.h>
 #include <ti/display/Display.h>
 
+#include <ti/devices/cc26x0r2/driverlib/gpio.h>
+#include <ti/devices/cc26x0r2/driverlib/ioc.h>
+
 #if defined( USE_FPGA ) || defined( DEBUG_SW_TRACE )
 #include <driverlib/ioc.h>
 #endif // USE_FPGA | DEBUG_SW_TRACE
@@ -82,6 +85,14 @@
 #include "board.h"
 
 #include "simple_peripheral.h"
+
+// --- AGGIUNTE PER IL SENSOR CONTROLLER ---
+#include "scif.h"
+#include "scif_osal_tirtos.h"
+
+// Callback chiamata quando arrivano dati UART dal Sensor Controller
+static void scTaskAlertCallback(void);
+// -----------------------------------------
 
 /*********************************************************************
  * CONSTANTS
@@ -116,7 +127,7 @@
 #define DEFAULT_CONN_PAUSE_PERIPHERAL         6
 
 // How often to perform periodic event (in msec)
-#define SBP_PERIODIC_EVT_PERIOD               5000
+#define SBP_PERIODIC_EVT_PERIOD               500
 
 // Application specific event ID for HCI Connection Event End Events
 #define SBP_HCI_CONN_EVT_END_EVT              0x0001
@@ -638,6 +649,42 @@ static void SimplePeripheral_init(void)
 #endif // !defined (USE_LL_CONN_PARAM_UPDATE)
 
   Display_print0(dispHandle, 0, 0, "BLE Peripheral");
+
+  // --- TEST HARDWARE ---
+  // Configura il PIN 6 (LED Rosso della Launchpad) come output
+  //IOCPinTypeGpioOutput(6);
+  // Accendi il LED (1 = Acceso, 0 = Spento)
+  //GPIO_writeDio(6, 1);
+  // ---------------------
+
+// --- BATTO DI VITA INIZIALE (Blink) ---
+  IOCPinTypeGpioOutput(6); // Configura PIN 6 (LED Rosso)
+  GPIO_writeDio(6, 1);     // Accendi il LED
+  volatile uint32_t i;
+  for(i = 0; i < 1000000; i++) {} 
+  GPIO_writeDio(6, 0);     // Spegni il LED
+  // --------------------------------------
+
+  // --- ACCENSIONE ARDUINO (Il "Boss" accende il pin 14) ---
+  IOCPinTypeGpioOutput(14); 
+  GPIO_writeDio(14, 1);    // Manda 3.3V al Pin 4 di Arduino per svegliarlo!
+  // --------------------------------------------------------
+
+  // --- INIZIALIZZAZIONE SENSOR CONTROLLER (UART) ---
+  // Inizializza il sistema operativo per il Sensor Controller
+  scifOsalInit();
+  scifOsalRegisterCtrlReadyCallback(NULL); 
+  scifOsalRegisterTaskAlertCallback(scTaskAlertCallback); // Registra il "campanello"
+  
+  // Inizializza il driver
+  scifInit(&scifDriverSetup);
+  
+  // Avvia il task dell'emulatore UART. 
+  // (Se ti dà errore su questa riga, controlla nel file scif.h come Sasha ha chiamato il TASK_ID)
+  scifStartTasksNbl(1 << SCIF_UART_EMULATOR_TASK_ID);
+  uint8_t testForza[5] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE};
+  SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5, 5, testForza);
+  // -------------------------------------------------
 }
 
 /*********************************************************************
@@ -1210,6 +1257,14 @@ static void SimplePeripheral_performPeriodicTask(void)
     SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, sizeof(uint8_t),
                                &valueToCopy);
   }
+
+  // --- LETTURA SENSORE E INVIO BLUETOOTH ---
+  // 1. Legge lo stato del sensore (0 oppure 1)
+  //uint8_t statoSensore = GPIO_readDio(14);
+
+  // 2. Invia il valore in tempo reale alla Caratteristica 1 del Bluetooth
+  //SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, sizeof(uint8_t), &statoSensore);
+  // -----------------------------------------
 }
 
 /*********************************************************************
@@ -1391,3 +1446,77 @@ static uint8_t SimplePeripheral_enqueueMsg(uint8_t event, uint8_t state,
 }
 /*********************************************************************
 *********************************************************************/
+
+
+/*********************************************************************
+ * @fn      scTaskAlertCallback
+ *
+ * @brief   Viene chiamata dal Sensor Controller quando arrivano dati.
+ * Legge il Ring Buffer UART, cerca l'Header (0xFF), decodifica
+ * i 4 byte di Sasha e invia la distanza via Bluetooth.
+ *********************************************************************/
+static void scTaskAlertCallback(void) {
+    // Variabili "static" per ricordarsi lo stato tra una chiamata e l'altra
+    static uint16_t rxTail = 0;      // Il nostro "segnalibro" di lettura
+    static uint8_t packet[4];        // Qui parcheggiamo i 4 byte del pacchetto
+    static uint8_t packetIndex = 0;  // Contatore dei byte ricevuti
+
+    // 1. Pulisce l'avviso di interrupt
+    scifClearAlertIntSource();
+    
+    // 2. Scopriamo dove è arrivato a scrivere il Sensor Controller 
+    // (Di default nei progetti TI si chiama rxHead nella struct state)
+    uint16_t rxHead = scifTaskData.uartEmulator.state.rxHead;
+    
+    // 3. Leggiamo tutti i byte nuovi rimasti nel buffer circolare
+    while (rxTail != rxHead) {
+        // Prende il byte dal nastro trasportatore
+        uint8_t byteRicevuto = scifTaskData.uartEmulator.output.pRxBuffer[rxTail] & 0xFF;
+        
+        // --- MACCHINA A STATI PER LEGGERE IL PACCHETTO DI SASHA ---
+        if (packetIndex == 0) {
+            if (byteRicevuto == 0xFF) { // Abbiamo trovato l'Header! Inizia il pacchetto.
+                packet[0] = byteRicevuto;
+                packetIndex++;
+            }
+        } else {
+            packet[packetIndex] = byteRicevuto;
+            packetIndex++;
+            
+            if (packetIndex == 4) { // Abbiamo tutti e 4 i byte!
+                // Calcola il Checksum (Header + ByteAlto + ByteBasso)
+                uint8_t checksumCalcolato = (packet[0] + packet[1] + packet[2]) & 0xFF;
+                
+                if (checksumCalcolato == packet[3]) {
+                    // I DATI SONO PERFETTI! Inviali al Bluetooth
+                    // Creiamo un pacchetto da 5 byte (riempito di zeri)
+                    uint8_t blePayload[5] = {0, 0, 0, 0, 0}; 
+                    blePayload[0] = packet[1]; // Byte alto della distanza
+                    blePayload[1] = packet[2]; // Byte basso della distanza
+                    
+                    // Ora inviamo 5 byte esatti, così il buttafuori BLE ci fa passare!
+                    SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5, 5, blePayload);
+                }
+                
+                // Resetta l'indice per aspettare il prossimo pacchetto (il prossimo 0xFF)
+                packetIndex = 0; 
+            }
+        }
+        // ----------------------------------------------------------
+
+        // Avanziamo il nostro segnalibro di lettura. 
+        // Se arriviamo a 64 (la fine del nastro), ricominciamo da 0.
+        if (++rxTail >= 64) {
+            rxTail = 0;
+        }
+    }
+    
+    // 4. Conferma al Sensor Controller che abbiamo letto i dati
+    scifAckAlertEvents();
+    
+    // 5. Riattiva l'allarme per il futuro
+    scifOsalEnableTaskAlertInt();
+}
+
+
+
