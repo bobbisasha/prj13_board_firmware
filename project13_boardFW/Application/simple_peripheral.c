@@ -1254,74 +1254,82 @@ static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramID)
  */
 static void SimplePeripheral_performPeriodicTask(void)
 {
+    uint32_t somma_distanze = 0;
+    uint16_t campioni_validi = 0;
 
-  uint32_t somma_distanze = 0;
-  uint16_t campioni_validi = 0;
+    // 1. Controlla quanti byte ci sono (Max 63 secondo scif.h)
+    uint32_t fifoCount = scifUartGetRxFifoCount();
 
-  uint32_t fifoCount = scifUartGetRxFifoCount();
+    if (fifoCount >= 4) {
+        uint8_t localBuf[64]; // Buffer temporaneo per salvare l'intera FIFO
 
-  // 1. Leggiamo tutti i dati accumulati nella FIFO dal Sensor Controller
-  while (scifUartGetRxFifoCount() >= 4) {
-      uint8_t d0 = (uint8_t)scifUartRxGetChar();
+        // 2. Svuota l'intera FIFO hardware in un colpo solo
+        for (uint32_t i = 0; i < fifoCount; i++) {
+            // Cast a uint8_t: ignoriamo intenzionalmente i flag di errore hardware
+            localBuf[i] = (uint8_t)scifUartRxGetChar(); 
+        }
+
+        // 3. Scansiona il buffer alla ricerca di pacchetti validi (Sliding Window)
+        // Ci fermiamo a fifoCount - 4 perché un pacchetto richiede 4 byte
+        for (uint32_t i = 0; i <= fifoCount - 4; i++) {
+            
+            if (localBuf[i] == 0xFF) {
+                uint8_t d1 = localBuf[i+1];
+                uint8_t d2 = localBuf[i+2];
+                uint8_t d3 = localBuf[i+3];
+
+                // Verifica il Checksum (Formula corretta per A02YYUW: 0xFF + H + L)
+                if (((0xFF + d1 + d2) & 0xFF) == d3) { 
+                    
+                    uint16_t distanza_mm = (d1 << 8) | d2;
+                  
+                    // Filtro: Accettiamo solo letture nel range valido del sensore
+                    if (distanza_mm >= 30 && distanza_mm <= 4500) {
+                        somma_distanze += distanza_mm;
+                        campioni_validi++;
+                    }
+                    
+                    // Abbiamo trovato un pacchetto valido, saltiamo i prossimi 3 byte
+                    i += 3; 
+                }
+                // Se il checksum fallisce, il ciclo `for` avanzerà semplicemente di 1 (i++),
+                // permettendoci di non perdere l'header reale se questo era un "falso" 0xFF.
+            }
+        }
+    }
+
+    // 4. Se abbiamo raccolto dati validi, calcoliamo la media e inviamo via BLE
+    if (campioni_validi > 0) {
+        uint16_t media_mm = somma_distanze / campioni_validi;
       
-      // Cerchiamo l'header di inizio pacchetto
-      if (d0 == 0xFF) { 
-          uint8_t d1 = (uint8_t)scifUartRxGetChar();
-          uint8_t d2 = (uint8_t)scifUartRxGetChar();
-          uint8_t d3 = (uint8_t)scifUartRxGetChar();
+        // --- Calcolo Percentuale ---
+        const uint16_t DISTANZA_VUOTO = 450; 
+        const uint16_t DISTANZA_PIENO = 30;  
+        uint8_t percentuale_riempimento = 0;
 
-          // Verifica il Checksum
-          if (((d1 + d2) & 0xFF) == d3) { 
-              uint16_t distanza_mm = (d1 << 8) | d2;
-              
-              // Filtro: Accettiamo solo letture nel range valido del sensore
-              if (distanza_mm >= 30 && distanza_mm <= 4500) {
-                  somma_distanze += distanza_mm;
-                  campioni_validi++;
-              }
-          }
-      }
-  }
+        if (media_mm > DISTANZA_VUOTO) {
+            media_mm = DISTANZA_VUOTO;
+        } else if (media_mm < DISTANZA_PIENO) {
+            media_mm = DISTANZA_PIENO;
+        }
 
-  // 2. Se abbiamo raccolto dati validi, calcoliamo la media e inviamo via BLE
-  if (campioni_validi > 0) {
-      uint16_t media_mm = somma_distanze / campioni_validi;
+        uint32_t numeratore = (DISTANZA_VUOTO - media_mm) * 100;
+        uint16_t denominatore = (DISTANZA_VUOTO - DISTANZA_PIENO);
       
-    // --- Calcolo Percentuale ---
-      // Costanti fisiche del cestino Amiat (in mm)
-      const uint16_t DISTANZA_VUOTO = 450; // Fondo del cestino
-      const uint16_t DISTANZA_PIENO = 30;  // Blind zone del sensore (cestino colmo)
-      uint8_t percentuale_riempimento = 0;
+        percentuale_riempimento = (uint8_t)(numeratore / denominatore);
 
-      // 1. Clamp di sicurezza: limitiamo i valori grezzi nei limiti fisici
-      // Questo previene underflow/overflow matematici (percentuali < 0 o > 100)
-      if (media_mm > DISTANZA_VUOTO) {
-          media_mm = DISTANZA_VUOTO;
-      } else if (media_mm < DISTANZA_PIENO) {
-          media_mm = DISTANZA_PIENO;
-      }
+        // Prepariamo il payload a 5 byte per la Characteristic 5
+        uint8_t blePayload[5] = {0, 0, 0, 0, 0};
+        blePayload[0] = percentuale_riempimento; 
+        blePayload[1] = (media_mm >> 8) & 0xFF;  
+        blePayload[2] = media_mm & 0xFF;         
 
-      // 2. Calcolo percentuale lineare
-      // Invertiamo la logica: distanza minore = cestino più pieno.
-      // Moltiplichiamo prima per 100 per mantenere la precisione durante la divisione intera.
-      uint32_t numeratore = (DISTANZA_VUOTO - media_mm) * 100;
-      uint16_t denominatore = (DISTANZA_VUOTO - DISTANZA_PIENO);
-      
-      percentuale_riempimento = (uint8_t)(numeratore / denominatore);
-      // --------------------------------------------
-      // --------------------------------------------
-
-      // Prepariamo il payload a 5 byte per la Characteristic 5
-      uint8_t blePayload[5] = {0, 0, 0, 0, 0};
-      blePayload[0] = percentuale_riempimento; // Byte 0: Percentuale (0-100)
-      blePayload[1] = (media_mm >> 8) & 0xFF;  // Byte 1: Media High (per debug)
-      blePayload[2] = media_mm & 0xFF;         // Byte 2: Media Low  (per debug)
-
-      // Invio effettivo alla Caratteristica 5
-      SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5, 5, blePayload);
-  }
-  // Riavvia il timer per la prossima lettura
-  Util_startClock(&periodicClock);
+        // Invio effettivo alla Caratteristica 5
+        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5, 5, blePayload);
+    }
+    
+    // Riavvia il timer per la prossima lettura
+    Util_startClock(&periodicClock);
 }
 
 /*********************************************************************
