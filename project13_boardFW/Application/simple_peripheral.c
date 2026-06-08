@@ -91,6 +91,8 @@
 #include "scif_osal_tirtos.h"
 
 
+#include <ti/devices/cc26x0r2/inc/hw_aon_wuc.h>
+
 /*********************************************************************
  * CONSTANTS
  */
@@ -484,8 +486,10 @@ static void SimplePeripheral_init(void)
   appMsgQueue = Util_constructQueue(&appMsg);
 
   // Create one-shot clocks for internal periodic events.
-  Util_constructClock(&periodicClock, SimplePeripheral_clockHandler,
-                      SBP_PERIODIC_EVT_PERIOD, 0, false, SBP_PERIODIC_EVT);
+ Util_constructClock(&periodicClock, SimplePeripheral_clockHandler,
+                    SBP_PERIODIC_EVT_PERIOD, 0, false, SBP_PERIODIC_EVT);
+//                                           ^  ^^^^^
+//                                    reload=0  start=false (one-shot)
 
   dispHandle = Display_open(SBP_DISPLAY_TYPE, NULL);
 
@@ -662,10 +666,26 @@ static void SimplePeripheral_init(void)
   scifOsalRegisterTaskAlertCallback(NULL); // Nessun interrupt necessario, usiamo il polling periodico
   
   // Inizializza il driver
-  scifInit(&scifDriverSetup);
-  
+scifInit(&scifDriverSetup);
+
   // Avvia il task dell'emulatore UART. 
-  scifStartTasksNbl(1 << SCIF_UART_EMULATOR_TASK_ID);
+scifStartTasksNbl(1 << SCIF_UART_EMULATOR_TASK_ID);
+
+//volatile uint16_t taskStarted = scifTaskData.uartEmulator.state.rxEnable;
+
+  scifUartSetBaudRate(9600);    // Configura l'AUX Timer 0 per i 9600 baud [cite: 105]
+  scifUartSetRxTimeout(20);     //Imposta il timeout inter-byte (20 half-bit-period)
+  scifUartRxEnable(1);          // Attiva il ricevitore e la rilevazione del bit di start [cite: 100]
+  
+//volatile uint16_t scifStatus = scifTaskData.uartEmulator.state.rxEnabled;
+
+  // TEST LOOPBACK — da rimuovere dopo il test
+Task_sleep(100000 / Clock_tickPeriod); // aspetta 100ms
+scifUartTxPutChar(0xFF);
+scifUartTxPutChar(0x01);
+scifUartTxPutChar(0x2C);
+scifUartTxPutChar(0x2D); // checksum = (0x01 + 0x2C) & 0xFF
+Task_sleep(2000000 / Clock_tickPeriod); // aspetta che la trasmissione finisca
   // -------------------------------------------------
 }
 
@@ -742,7 +762,7 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
 
       if (events & SBP_PERIODIC_EVT)
       {
-        Util_startClock(&periodicClock);
+        //Util_startClock(&periodicClock);
 
         // Perform periodic application task
         SimplePeripheral_performPeriodicTask();
@@ -1234,8 +1254,11 @@ static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramID)
  */
 static void SimplePeripheral_performPeriodicTask(void)
 {
+
   uint32_t somma_distanze = 0;
   uint16_t campioni_validi = 0;
+
+  uint32_t fifoCount = scifUartGetRxFifoCount();
 
   // 1. Leggiamo tutti i dati accumulati nella FIFO dal Sensor Controller
   while (scifUartGetRxFifoCount() >= 4) {
@@ -1248,7 +1271,7 @@ static void SimplePeripheral_performPeriodicTask(void)
           uint8_t d3 = (uint8_t)scifUartRxGetChar();
 
           // Verifica il Checksum
-          if (((d0 + d1 + d2) & 0xFF) == d3) { 
+          if (((d1 + d2) & 0xFF) == d3) { 
               uint16_t distanza_mm = (d1 << 8) | d2;
               
               // Filtro: Accettiamo solo letture nel range valido del sensore
