@@ -1,6 +1,6 @@
 /******************************************************************************
 
- @file  simple_peripheral.c
+ @file  simple_peripheral_dbg.c
 
  @brief This file contains the Simple Peripheral sample application for use
         with the CC2650 Bluetooth Low Energy Protocol Stack.
@@ -10,7 +10,7 @@
 
  ******************************************************************************
  
- Copyright (c) 2013-2021, Texas Instruments Incorporated
+ Copyright (c) 2013-2024, Texas Instruments Incorporated
  All rights reserved.
 
  Redistribution and use in source and binary forms, with or without
@@ -54,133 +54,131 @@
 #include <ti/sysbios/knl/Clock.h>
 #include <ti/sysbios/knl/Event.h>
 #include <ti/sysbios/knl/Queue.h>
-#include <ti/display/Display.h>
 
-#include <ti/devices/cc26x0r2/driverlib/gpio.h>
-#include <ti/devices/cc26x0r2/driverlib/ioc.h>
-
-#if defined( USE_FPGA ) || defined( DEBUG_SW_TRACE )
-#include <driverlib/ioc.h>
-#endif // USE_FPGA | DEBUG_SW_TRACE
-
-#include <icall.h>
-#include "util.h"
-#include "att_rsp.h"
-
-/* This Header file contains all BLE API and icall structure definition */
-#include "icall_ble_api.h"
-
+#include "hci_tl.h"
+#include "gatt.h"
+#include "linkdb.h"
+#include "gapgattserver.h"
+#include "gattservapp.h"
 #include "devinfoservice.h"
 #include "simple_gatt_profile.h"
-#include "ll_common.h"
+
+#if defined(FEATURE_OAD) || defined(IMAGE_INVALIDATE)
+#include "oad_target.h"
+#include "oad.h"
+#endif //FEATURE_OAD || IMAGE_INVALIDATE
 
 #include "peripheral.h"
+#include "gapbondmgr.h"
+
+#include "osal_snv.h"
+#include "icall_apimsg.h"
+
+#include "util.h"
 
 #ifdef USE_RCOSC
 #include "rcosc_calibration.h"
 #endif //USE_RCOSC
 
+#include <ti/mw/display/Display.h>
 #include "board_key.h"
 
 #include "board.h"
 
 #include "simple_peripheral.h"
 
-// --- AGGIUNTE PER IL SENSOR CONTROLLER ---
-#include "scif.h"
-#include "scif_osal_tirtos.h"
-
-// Callback chiamata quando arrivano dati UART dal Sensor Controller
-static void scTaskAlertCallback(void);
-// -----------------------------------------
 
 /*********************************************************************
  * CONSTANTS
  */
+#if defined( POWER_MEASURE ) && ! defined ( Display_DISABLE_ALL )
+#error "POWER_MEASURE and Display_DISABLE_ALL should both be defined"
+#endif // POWER_MEASURE & ! Display_DISABLE_ALL
 
 // Advertising interval when device is discoverable (units of 625us, 160=100ms)
 #define DEFAULT_ADVERTISING_INTERVAL          160
 
-// General discoverable mode: advertise indefinitely
+// Limited discoverable mode advertises for 30.72s, and then stops
+// General discoverable mode advertises indefinitely
 #define DEFAULT_DISCOVERABLE_MODE             GAP_ADTYPE_FLAGS_GENERAL
 
-// Minimum connection interval (units of 1.25ms, 80=100ms) for automatic
-// parameter update request
+#ifndef FEATURE_OAD
+// Minimum connection interval (units of 1.25ms, 80=100ms) if automatic
+// parameter update request is enabled
 #define DEFAULT_DESIRED_MIN_CONN_INTERVAL     80
 
-// Maximum connection interval (units of 1.25ms, 800=1000ms) for automatic
-// parameter update request
+// Maximum connection interval (units of 1.25ms, 800=1000ms) if automatic
+// parameter update request is enabled
 #define DEFAULT_DESIRED_MAX_CONN_INTERVAL     800
+#else //!FEATURE_OAD
+// Minimum connection interval (units of 1.25ms, 8=10ms) if automatic
+// parameter update request is enabled
+#define DEFAULT_DESIRED_MIN_CONN_INTERVAL     8
 
-// Slave latency to use for automatic parameter update request
+// Maximum connection interval (units of 1.25ms, 8=10ms) if automatic
+// parameter update request is enabled
+#define DEFAULT_DESIRED_MAX_CONN_INTERVAL     8
+#endif // FEATURE_OAD
+
+// Slave latency to use if automatic parameter update request is enabled
 #define DEFAULT_DESIRED_SLAVE_LATENCY         0
 
-// Supervision timeout value (units of 10ms, 1000=10s) for automatic parameter
-// update request
+// Supervision timeout value (units of 10ms, 1000=10s) if automatic parameter
+// update request is enabled
 #define DEFAULT_DESIRED_CONN_TIMEOUT          1000
 
-// After the connection is formed, the peripheral waits until the central
-// device asks for its preferred connection parameters
-#define DEFAULT_ENABLE_UPDATE_REQUEST         GAPROLE_LINK_PARAM_UPDATE_WAIT_REMOTE_PARAMS
+// Whether to enable automatic parameter update request when a connection is
+// formed
+#ifdef POWER_MEASURE
+#define DEFAULT_ENABLE_UPDATE_REQUEST         FALSE
+#else
+#define DEFAULT_ENABLE_UPDATE_REQUEST         TRUE
+#endif //POWER_MEASURE
 
 // Connection Pause Peripheral time value (in seconds)
 #define DEFAULT_CONN_PAUSE_PERIPHERAL         6
 
 // How often to perform periodic event (in msec)
-#define SBP_PERIODIC_EVT_PERIOD               500
+#define SBP_PERIODIC_EVT_PERIOD               5000
 
-// Application specific event ID for HCI Connection Event End Events
-#define SBP_HCI_CONN_EVT_END_EVT              0x0001
-
-// Type of Display to open
-#if !defined(Display_DISABLE_ALL)
-  #if defined(BOARD_DISPLAY_USE_LCD) && (BOARD_DISPLAY_USE_LCD!=0)
-    #define SBP_DISPLAY_TYPE Display_Type_LCD
-  #elif defined (BOARD_DISPLAY_USE_UART) && (BOARD_DISPLAY_USE_UART!=0)
-    #define SBP_DISPLAY_TYPE Display_Type_UART
-  #else // !BOARD_DISPLAY_USE_LCD && !BOARD_DISPLAY_USE_UART
-    #define SBP_DISPLAY_TYPE 0 // Option not supported
-  #endif // BOARD_DISPLAY_USE_LCD && BOARD_DISPLAY_USE_UART
-#else // BOARD_DISPLAY_USE_LCD && BOARD_DISPLAY_USE_UART
-  #define SBP_DISPLAY_TYPE 0 // No Display
-#endif // !Display_DISABLE_ALL
+#ifdef FEATURE_OAD
+// The size of an OAD packet.
+#define OAD_PACKET_SIZE                       ((OAD_BLOCK_SIZE) + 2)
+#endif // FEATURE_OAD
 
 // Task configuration
 #define SBP_TASK_PRIORITY                     1
 
 #ifndef SBP_TASK_STACK_SIZE
-#define SBP_TASK_STACK_SIZE                   1024
+#define SBP_TASK_STACK_SIZE                   644
 #endif
-
-
-// Application events
-#define SBP_STATE_CHANGE_EVT                  0x0001
-#define SBP_CHAR_CHANGE_EVT                   0x0002
-#define SBP_PAIRING_STATE_EVT                 0x0004
-#define SBP_PASSCODE_NEEDED_EVT               0x0008
-#define SBP_CONN_EVT                          0x0010
-#define SBP_SC_ALERT_EVT                      Event_Id_01
 
 // Internal Events for RTOS application
 #define SBP_ICALL_EVT                         ICALL_MSG_EVENT_ID // Event_Id_31
 #define SBP_QUEUE_EVT                         UTIL_QUEUE_EVENT_ID // Event_Id_30
-#define SBP_PERIODIC_EVT                      Event_Id_00
+#define SBP_STATE_CHANGE_EVT                  Event_Id_00
+#define SBP_CHAR_CHANGE_EVT                   Event_Id_01
+#define SBP_PERIODIC_EVT                      Event_Id_02
+#define SBP_CONN_EVT_END_EVT                  Event_Id_03
+#ifdef FEATURE_OAD
+#define SBP_QUEUE_PING_EVT                    Event_Id_04
 
-// Bitwise OR of all events to pend on
 #define SBP_ALL_EVENTS                        (SBP_ICALL_EVT        | \
                                                SBP_QUEUE_EVT        | \
+                                               SBP_STATE_CHANGE_EVT | \
+                                               SBP_CHAR_CHANGE_EVT  | \
                                                SBP_PERIODIC_EVT     | \
-                                               SBP_SC_ALERT_EVT)
+                                               SBP_CONN_EVT_END_EVT | \
+                                               SBP_QUEUE_PING_EVT)
+#else
+#define SBP_ALL_EVENTS                        (SBP_ICALL_EVT        | \
+                                               SBP_QUEUE_EVT        | \
+                                               SBP_STATE_CHANGE_EVT | \
+                                               SBP_CHAR_CHANGE_EVT  | \
+                                               SBP_PERIODIC_EVT     | \
+                                               SBP_CONN_EVT_END_EVT)
+#endif /* FEATURE_OAD */
 
-
-// Set the register cause to the registration bit-mask
-#define CONNECTION_EVENT_REGISTER_BIT_SET(RegisterCause) (connectionEventRegisterCauseBitMap |= RegisterCause )
-// Remove the register cause from the registration bit-mask
-#define CONNECTION_EVENT_REGISTER_BIT_REMOVE(RegisterCause) (connectionEventRegisterCauseBitMap &= (~RegisterCause) )
-// Gets whether the current App is registered to the receive connection events
-#define CONNECTION_EVENT_IS_REGISTERED (connectionEventRegisterCauseBitMap > 0)
-// Gets whether the RegisterCause was registered to recieve connection event
-#define CONNECTION_EVENT_REGISTRATION_CAUSE(RegisterCause) (connectionEventRegisterCauseBitMap & RegisterCause )
 
 /*********************************************************************
  * TYPEDEFS
@@ -190,7 +188,6 @@ static void scTaskAlertCallback(void);
 typedef struct
 {
   appEvtHdr_t hdr;  // event header.
-  uint8_t *pData;  // event data
 } sbpEvt_t;
 
 /*********************************************************************
@@ -211,18 +208,29 @@ static ICall_EntityID selfEntity;
 // local events.
 static ICall_SyncHandle syncEvent;
 
+#ifndef POWER_MEASURE
 // Clock instances for internal periodic events.
 static Clock_Struct periodicClock;
+#endif // ! POWER_MEASURE
 
 // Queue object used for app messages
 static Queue_Struct appMsg;
 static Queue_Handle appMsgQueue;
 
+#if defined(FEATURE_OAD)
+// Event data from OAD profile.
+static Queue_Struct oadQ;
+static Queue_Handle hOadQ;
+#endif //FEATURE_OAD
+
 // Task configuration
 Task_Struct sbpTask;
 Char sbpTaskStack[SBP_TASK_STACK_SIZE];
 
-// Scan response data (max size = 31 bytes)
+// Profile state and parameters
+//static gaprole_States_t gapProfileState = GAPROLE_INIT;
+
+// GAP - SCAN RSP data (max size = 31 bytes)
 static uint8_t scanRspData[] =
 {
   // complete name
@@ -262,29 +270,41 @@ static uint8_t scanRspData[] =
   0       // 0dBm
 };
 
-// Advertisement data (max size = 31 bytes, though this is
-// best kept short to conserve power while advertising)
+// GAP - Advertisement data (max size = 31 bytes, though this is
+// best kept short to conserve power while advertisting)
 static uint8_t advertData[] =
 {
-  // Flags: this field sets the device to use general discoverable
-  // mode (advertises indefinitely) instead of general
-  // discoverable mode (advertise for 30 seconds at a time)
+  // Flags; this sets the device to use limited discoverable
+  // mode (advertises for 30 seconds at a time) instead of general
+  // discoverable mode (advertises indefinitely)
   0x02,   // length of this data
   GAP_ADTYPE_FLAGS,
   DEFAULT_DISCOVERABLE_MODE | GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED,
 
   // service UUID, to notify central devices what services are included
   // in this peripheral
+#if !defined(FEATURE_OAD) || defined(FEATURE_OAD_ONCHIP)
   0x03,   // length of this data
+#else //OAD for external flash
+  0x05,  // lenght of this data
+#endif //FEATURE_OAD
   GAP_ADTYPE_16BIT_MORE,      // some of the UUID's, but not all
+#ifdef FEATURE_OAD
+  LO_UINT16(OAD_SERVICE_UUID),
+  HI_UINT16(OAD_SERVICE_UUID),
+#endif //FEATURE_OAD
+#ifndef FEATURE_OAD_ONCHIP
   LO_UINT16(SIMPLEPROFILE_SERV_UUID),
   HI_UINT16(SIMPLEPROFILE_SERV_UUID)
+#endif //FEATURE_OAD_ONCHIP
 };
 
 // GAP GATT Attributes
 static uint8_t attDeviceName[GAP_DEVICE_NAME_LEN] = "Simple Peripheral";
 
-static uint8_t scSensorPayload[5] = {0, 0, 0, 0, 0};
+// Globals used for ATT Response retransmission
+static gattMsgEvent_t *pAttRsp = NULL;
+static uint8_t rspTxRetry = 0;
 
 /*********************************************************************
  * LOCAL FUNCTIONS
@@ -298,27 +318,24 @@ static uint8_t SimplePeripheral_processGATTMsg(gattMsgEvent_t *pMsg);
 static void SimplePeripheral_processAppMsg(sbpEvt_t *pMsg);
 static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState);
 static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramID);
+#ifndef POWER_MEASURE
 static void SimplePeripheral_performPeriodicTask(void);
 static void SimplePeripheral_clockHandler(UArg arg);
+#endif // ! POWER_MEASURE
 
-static void SimplePeripheral_passcodeCB(uint8_t *deviceAddr,
-                                        uint16_t connHandle,
-                                        uint8_t uiInputs, uint8_t uiOutputs,
-                                        uint32_t numComparison);
-static void SimplePeripheral_pairStateCB(uint16_t connHandle, uint8_t state,
-                                         uint8_t status);
-static void SimplePeripheral_processPairState(uint8_t state, uint8_t status);
-static void SimplePeripheral_processPasscode(uint8_t uiOutputs);
+static void SimplePeripheral_sendAttRsp(void);
+static void SimplePeripheral_freeAttRsp(uint8_t status);
 
 static void SimplePeripheral_stateChangeCB(gaprole_States_t newState);
+#ifndef FEATURE_OAD_ONCHIP
 static void SimplePeripheral_charValueChangeCB(uint8_t paramID);
-static uint8_t SimplePeripheral_enqueueMsg(uint8_t event, uint8_t state,
-                                              uint8_t *pData);
+#endif //!FEATURE_OAD_ONCHIP
+static void SimplePeripheral_enqueueMsg(uint8_t event, uint8_t state);
 
-static void SimplePeripheral_connEvtCB(Gap_ConnEventRpt_t *pReport);
-static void SimplePeripheral_processConnEvt(Gap_ConnEventRpt_t *pReport);
-
-
+#ifdef FEATURE_OAD
+void SimplePeripheral_processOadWriteCB(uint8_t event, uint16_t connHandle,
+                                           uint8_t *pData);
+#endif //FEATURE_OAD
 
 /*********************************************************************
  * EXTERN FUNCTIONS
@@ -329,99 +346,39 @@ extern void AssertHandler(uint8 assertCause, uint8 assertSubcause);
  * PROFILE CALLBACKS
  */
 
-// Peripheral GAPRole Callbacks
+// GAP Role Callbacks
 static gapRolesCBs_t SimplePeripheral_gapRoleCBs =
 {
-  SimplePeripheral_stateChangeCB     // GAPRole State Change Callbacks
+  SimplePeripheral_stateChangeCB     // Profile State Change Callbacks
 };
 
 // GAP Bond Manager Callbacks
-// These are set to NULL since they are not needed. The application
-// is set up to only perform justworks pairing.
 static gapBondCBs_t simplePeripheral_BondMgrCBs =
 {
-  SimplePeripheral_passcodeCB,  // Passcode callback
-  SimplePeripheral_pairStateCB  // Pairing / Bonding state Callback
+  NULL, // Passcode callback (not used by application)
+  NULL  // Pairing / Bonding state Callback (not used by application)
 };
 
 // Simple GATT Profile Callbacks
+#ifndef FEATURE_OAD_ONCHIP
 static simpleProfileCBs_t SimplePeripheral_simpleProfileCBs =
 {
-  SimplePeripheral_charValueChangeCB // Simple GATT Characteristic value change callback
+  SimplePeripheral_charValueChangeCB // Characteristic value change callback
 };
+#endif //!FEATURE_OAD_ONCHIP
+
+#ifdef FEATURE_OAD
+static oadTargetCBs_t simplePeripheral_oadCBs =
+{
+  SimplePeripheral_processOadWriteCB // Write Callback.
+};
+#endif //FEATURE_OAD
 
 /*********************************************************************
  * PUBLIC FUNCTIONS
  */
 
 /*********************************************************************
- * The following typedef and global handle the registration to connection event
- */
-typedef enum
-{
-   NOT_REGISTER       = 0,
-   FOR_AOA_SCAN       = 1,
-   FOR_ATT_RSP        = 2,
-   FOR_AOA_SEND       = 4,
-   FOR_TOF_SEND       = 8
-}connectionEventRegisterCause_u;
-
-// Handle the registration and un-registration for the connection event, since only one can be registered.
-uint32_t       connectionEventRegisterCauseBitMap = NOT_REGISTER; //see connectionEventRegisterCause_u
-
-/*********************************************************************
- * @fn      SimplePeripheral_RegistertToAllConnectionEvent()
- *
- * @brief   register to receive connection events for all the connection
- *
- * @param connectionEventRegisterCause represents the reason for registration
- *
- * @return @ref SUCCESS
- *
- */
-bStatus_t SimplePeripheral_RegistertToAllConnectionEvent (connectionEventRegisterCause_u connectionEventRegisterCause)
-{
-  bStatus_t status = SUCCESS;
-
-  // in case  there is no registration for the connection event, make the registration
-  if (!CONNECTION_EVENT_IS_REGISTERED)
-  {
-    status = GAP_RegisterConnEventCb(SimplePeripheral_connEvtCB, GAP_CB_REGISTER, LINKDB_CONNHANDLE_ALL);
-  }
-  if(status == SUCCESS)
-  {
-    //add the reason bit to the bitamap.
-    CONNECTION_EVENT_REGISTER_BIT_SET(connectionEventRegisterCause);
-  }
-
-  return(status);
-}
-
-/*********************************************************************
- * @fn      SimplePeripheral_UnRegistertToAllConnectionEvent()
- *
- * @brief   Unregister connection events
- *
- * @param connectionEventRegisterCause represents the reason for registration
- *
- * @return @ref SUCCESS
- *
- */
-bStatus_t SimplePeripheral_UnRegistertToAllConnectionEvent (connectionEventRegisterCause_u connectionEventRegisterCause)
-{
-  bStatus_t status = SUCCESS;
-
-  CONNECTION_EVENT_REGISTER_BIT_REMOVE(connectionEventRegisterCause);
-  // in case  there is no more registration for the connection event than unregister
-  if (!CONNECTION_EVENT_IS_REGISTERED)
-  {
-    GAP_RegisterConnEventCb(SimplePeripheral_connEvtCB, GAP_CB_UNREGISTER, LINKDB_CONNHANDLE_ALL);
-  }
-
-  return(status);
-}
-
- /*********************************************************************
  * @fn      SimplePeripheral_createTask
  *
  * @brief   Task creation function for the Simple Peripheral.
@@ -464,51 +421,62 @@ static void SimplePeripheral_init(void)
   // so that the application can send and receive messages.
   ICall_registerApp(&selfEntity, &syncEvent);
 
-#ifdef USE_RCOSC
-  RCOSC_enableCalibration();
-#endif // USE_RCOSC
-
 #if defined( USE_FPGA )
-  // configure RF Core SMI Data Link
-  IOCPortConfigureSet(IOID_12, IOC_PORT_RFC_GPO0, IOC_STD_OUTPUT);
-  IOCPortConfigureSet(IOID_11, IOC_PORT_RFC_GPI0, IOC_STD_INPUT);
+  #if defined( CC26XX ) || defined( CC13XX )
+    // configure RF Core SMI Data Link
+    IOCPortConfigureSet(IOID_12, IOC_PORT_RFC_GPO0, IOC_STD_OUTPUT);
+    IOCPortConfigureSet(IOID_11, IOC_PORT_RFC_GPI0, IOC_STD_INPUT);
 
-  // configure RF Core SMI Command Link
-  IOCPortConfigureSet(IOID_10, IOC_IOCFG0_PORT_ID_RFC_SMI_CL_OUT, IOC_STD_OUTPUT);
-  IOCPortConfigureSet(IOID_9, IOC_IOCFG0_PORT_ID_RFC_SMI_CL_IN, IOC_STD_INPUT);
+    // configure RF Core SMI Command Link
+    IOCPortConfigureSet(IOID_10, IOC_IOCFG0_PORT_ID_RFC_SMI_CL_OUT, IOC_STD_OUTPUT);
+    IOCPortConfigureSet(IOID_9, IOC_IOCFG0_PORT_ID_RFC_SMI_CL_IN, IOC_STD_INPUT);
 
-  // configure RF Core tracer IO
-  IOCPortConfigureSet(IOID_8, IOC_PORT_RFC_TRC, IOC_STD_OUTPUT);
+    // configure RF Core tracer IO
+    IOCPortConfigureSet(IOID_8, IOC_PORT_RFC_TRC, IOC_STD_OUTPUT);
+  #else
+    #error "BUILD ERROR: Unknown device!"
+  #endif // CC26XX
 #else // !USE_FPGA
   #if defined( DEBUG_SW_TRACE )
-    // configure RF Core tracer IO
     IOCPortConfigureSet(IOID_8, IOC_PORT_RFC_TRC, IOC_STD_OUTPUT | IOC_CURRENT_4MA | IOC_SLEW_ENABLE);
   #endif // DEBUG_SW_TRACE
 #endif // USE_FPGA
 
+  // Hard code the BD Address till CC2650 board gets its own IEEE address
+  //uint8 bdAddress[B_ADDR_LEN] = { 0xAD, 0xD0, 0x0A, 0xAD, 0xD0, 0x0A };
+  //HCI_EXT_SetBDADDRCmd(bdAddress);
+
+  // Set device's Sleep Clock Accuracy
+  //HCI_EXT_SetSCACmd(40);
+
+#ifdef USE_RCOSC
+  RCOSC_enableCalibration();
+#endif // USE_RCOSC
+
   // Create an RTOS queue for message from profile to be sent to app.
   appMsgQueue = Util_constructQueue(&appMsg);
 
+#ifndef POWER_MEASURE
   // Create one-shot clocks for internal periodic events.
   Util_constructClock(&periodicClock, SimplePeripheral_clockHandler,
                       SBP_PERIODIC_EVT_PERIOD, 0, false, SBP_PERIODIC_EVT);
+#endif // ! POWER_MEASURE
 
-  dispHandle = Display_open(SBP_DISPLAY_TYPE, NULL);
+#ifndef CC2650STK
+  dispHandle = Display_open(Display_Type_LCD, NULL);
+#endif //SENSORTAG_HW
 
-  // Set GAP Parameters: After a connection was established, delay in seconds
-  // before sending when GAPRole_SetParameter(GAPROLE_PARAM_UPDATE_ENABLE,...)
-  // uses GAPROLE_LINK_PARAM_UPDATE_INITIATE_BOTH_PARAMS or
-  // GAPROLE_LINK_PARAM_UPDATE_INITIATE_APP_PARAMS
-  // For current defaults, this has no effect.
+  // Setup the GAP
   GAP_SetParamValue(TGAP_CONN_PAUSE_PERIPHERAL, DEFAULT_CONN_PAUSE_PERIPHERAL);
 
-  // Setup the Peripheral GAPRole Profile. For more information see the User's
-  // Guide:
-  // http://software-dl.ti.com/lprf/sdg-latest/html/
+  // Setup the GAP Peripheral Role Profile
   {
+    // For all hardware platforms, device starts advertising upon initialization
+    uint8_t initialAdvertEnable = TRUE;
+
     // By setting this to zero, the device will go into the waiting state after
     // being discoverable for 30.72 second, and will not being advertising again
-    // until re-enabled by the application
+    // until the enabler is set back to TRUE
     uint16_t advertOffTime = 0;
 
     uint8_t enableUpdateRequest = DEFAULT_ENABLE_UPDATE_REQUEST;
@@ -517,6 +485,9 @@ static void SimplePeripheral_init(void)
     uint16_t desiredSlaveLatency = DEFAULT_DESIRED_SLAVE_LATENCY;
     uint16_t desiredConnTimeout = DEFAULT_DESIRED_CONN_TIMEOUT;
 
+    // Set the GAP Role Parameters
+    GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t),
+                         &initialAdvertEnable);
     GAPRole_SetParameter(GAPROLE_ADVERT_OFF_TIME, sizeof(uint16_t),
                          &advertOffTime);
 
@@ -536,17 +507,11 @@ static void SimplePeripheral_init(void)
                          &desiredConnTimeout);
   }
 
-  // Set the Device Name characteristic in the GAP GATT Service
-  // For more information, see the section in the User's Guide:
-  // http://software-dl.ti.com/lprf/sdg-latest/html
+  // Set the GAP Characteristics
   GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, attDeviceName);
 
-  // Set GAP Parameters to set the advertising interval
-  // For more information, see the GAP section of the User's Guide:
-  // http://software-dl.ti.com/lprf/sdg-latest/html
+  // Set advertising interval
   {
-    // Use the same interval for general and limited advertising.
-    // Note that only general advertising will occur based on the above configuration
     uint16_t advInt = DEFAULT_ADVERTISING_INTERVAL;
 
     GAP_SetParamValue(TGAP_LIM_DISC_ADV_INT_MIN, advInt);
@@ -555,44 +520,41 @@ static void SimplePeripheral_init(void)
     GAP_SetParamValue(TGAP_GEN_DISC_ADV_INT_MAX, advInt);
   }
 
-  // Setup the GAP Bond Manager. For more information see the section in the
-  // User's Guide:
-  // http://software-dl.ti.com/lprf/sdg-latest/html/
+  // Setup the GAP Bond Manager
   {
-    // Don't send a pairing request after connecting; the peer device must
-    // initiate pairing
     uint8_t pairMode = GAPBOND_PAIRING_MODE_WAIT_FOR_REQ;
-    // Use authenticated pairing: require passcode.
     uint8_t mitm = TRUE;
-    // This device only has display capabilities. Therefore, it will display the
-    // passcode during pairing. However, since the default passcode is being
-    // used, there is no need to display anything.
     uint8_t ioCap = GAPBOND_IO_CAP_DISPLAY_ONLY;
-    // Request bonding (storing long-term keys for re-encryption upon subsequent
-    // connections without repairing)
     uint8_t bonding = TRUE;
-    // Whether to replace the least recently used entry when bond list is full,
-    // and a new device is bonded.
-    // Alternative is pairing succeeds but bonding fails, unless application has
-    // manually erased at least one bond.
-    uint8_t replaceBonds = FALSE;
 
     GAPBondMgr_SetParameter(GAPBOND_PAIRING_MODE, sizeof(uint8_t), &pairMode);
     GAPBondMgr_SetParameter(GAPBOND_MITM_PROTECTION, sizeof(uint8_t), &mitm);
     GAPBondMgr_SetParameter(GAPBOND_IO_CAPABILITIES, sizeof(uint8_t), &ioCap);
     GAPBondMgr_SetParameter(GAPBOND_BONDING_ENABLED, sizeof(uint8_t), &bonding);
-    GAPBondMgr_SetParameter(GAPBOND_LRU_BOND_REPLACEMENT, sizeof(uint8_t), &replaceBonds);
   }
 
-  // Initialize GATT attributes
-  GGS_AddService(GATT_ALL_SERVICES);           // GAP GATT Service
-  GATTServApp_AddService(GATT_ALL_SERVICES);   // GATT Service
+   // Initialize GATT attributes
+  GGS_AddService(GATT_ALL_SERVICES);           // GAP
+  GATTServApp_AddService(GATT_ALL_SERVICES);   // GATT attributes
   DevInfo_AddService();                        // Device Information Service
-  SimpleProfile_AddService(GATT_ALL_SERVICES); // Simple GATT Profile
 
+#ifndef FEATURE_OAD_ONCHIP
+  SimpleProfile_AddService(GATT_ALL_SERVICES); // Simple GATT Profile
+#endif //!FEATURE_OAD_ONCHIP
+
+#ifdef FEATURE_OAD
+  VOID OAD_addService();                 // OAD Profile
+  OAD_register((oadTargetCBs_t *)&simplePeripheral_oadCBs);
+  hOadQ = Util_constructQueue(&oadQ);
+#endif //FEATURE_OAD
+
+#ifdef IMAGE_INVALIDATE
+  Reset_addService();
+#endif //IMAGE_INVALIDATE
+
+
+#ifndef FEATURE_OAD_ONCHIP
   // Setup the SimpleProfile Characteristic Values
-  // For more information, see the sections in the User's Guide:
-  // http://software-dl.ti.com/lprf/sdg-latest/html/
   {
     uint8_t charValue1 = 1;
     uint8_t charValue2 = 2;
@@ -612,82 +574,33 @@ static void SimplePeripheral_init(void)
                                charValue5);
   }
 
-  // Start the Device:
-  // Please Notice that in case of wanting to use the GAPRole_SetParameter
-  // function with GAPROLE_IRK or GAPROLE_SRK parameter - Perform
-  // these function calls before the GAPRole_StartDevice use.
-  // (because Both cases are updating the gapRole_IRK & gapRole_SRK variables).
-  VOID GAPRole_StartDevice(&SimplePeripheral_gapRoleCBs);
-
   // Register callback with SimpleGATTprofile
   SimpleProfile_RegisterAppCBs(&SimplePeripheral_simpleProfileCBs);
+#endif //!FEATURE_OAD_ONCHIP
 
-  // Start Bond Manager and register callback
+  // Start the Device
+  VOID GAPRole_StartDevice(&SimplePeripheral_gapRoleCBs);
+
+  // Start Bond Manager
   VOID GAPBondMgr_Register(&simplePeripheral_BondMgrCBs);
 
-  // Register with GAP for HCI/Host messages. This is needed to receive HCI
-  // events. For more information, see the section in the User's Guide:
-  // http://software-dl.ti.com/lprf/sdg-latest/html
+  // Register with GAP for HCI/Host messages
   GAP_RegisterForMsgs(selfEntity);
 
   // Register for GATT local events and ATT Responses pending for transmission
   GATT_RegisterForMsgs(selfEntity);
 
-  //Set default values for Data Length Extension
-  {
-    //Set initial values to maximum, RX is set to max. by default(251 octets, 2120us)
-    #define APP_SUGGESTED_PDU_SIZE 251 //default is 27 octets(TX)
-    #define APP_SUGGESTED_TX_TIME 2120 //default is 328us(TX)
+  HCI_LE_ReadMaxDataLenCmd();
 
-    //This API is documented in hci.h
-    //See the LE Data Length Extension section in the BLE-Stack User's Guide for information on using this command:
-    //http://software-dl.ti.com/lprf/sdg-latest/html/cc2640/index.html
-    //HCI_LE_WriteSuggestedDefaultDataLenCmd(APP_SUGGESTED_PDU_SIZE, APP_SUGGESTED_TX_TIME);
-  }
-
-#if !defined (USE_LL_CONN_PARAM_UPDATE)
-  // Get the currently set local supported LE features
-  // The HCI will generate an HCI event that will get received in the main
-  // loop
-  HCI_LE_ReadLocalSupportedFeaturesCmd();
-#endif // !defined (USE_LL_CONN_PARAM_UPDATE)
-
+#if defined FEATURE_OAD
+#if defined (HAL_IMAGE_A)
+  Display_print0(dispHandle, 0, 0, "BLE Peripheral A");
+#else
+  Display_print0(dispHandle, 0, 0, "BLE Peripheral B");
+#endif // HAL_IMAGE_A
+#else
   Display_print0(dispHandle, 0, 0, "BLE Peripheral");
-
-  // --- TEST HARDWARE ---
-  // Configura il PIN 6 (LED Rosso della Launchpad) come output
-  //IOCPinTypeGpioOutput(6);
-  // Accendi il LED (1 = Acceso, 0 = Spento)
-  //GPIO_writeDio(6, 1);
-  // ---------------------
-
-// --- BATTO DI VITA INIZIALE (Blink) ---
-  IOCPinTypeGpioOutput(6); // Configura PIN 6 (LED Rosso)
-  GPIO_writeDio(6, 1);     // Accendi il LED
-  volatile uint32_t i;
-  for(i = 0; i < 1000000; i++) {} 
-  GPIO_writeDio(6, 0);     // Spegni il LED
-  // --------------------------------------
-
-  // --- ACCENSIONE ARDUINO (Il "Boss" accende il pin 14) ---
-  IOCPinTypeGpioOutput(14); 
-  GPIO_writeDio(14, 1);    // Manda 3.3V al Pin 4 di Arduino per svegliarlo!
-  // --------------------------------------------------------
-
-  // --- INIZIALIZZAZIONE SENSOR CONTROLLER (UART) ---
-  scifOsalInit();
-  scifOsalRegisterCtrlReadyCallback(NULL);
-  scifOsalRegisterTaskAlertCallback(scTaskAlertCallback);
-  scifInit(&scifDriverSetup);
-  scifStartTasksNbl(1 << SCIF_UART_EMULATOR_TASK_ID);
-
-  // Configure UART: 9600 baud, alert when >=4 bytes or byte timeout
-  scifUartSetBaudRate(9600);
-  scifUartSetRxEnableReqIdleCount(1);
-  scifUartSetRxFifoThr(4);
-  scifUartSetEventMask(BV_SCIF_UART_ALERT_RX_FIFO_ABOVE_THR | BV_SCIF_UART_ALERT_RX_BYTE_TIMEOUT);
-  scifUartRxEnable(1);
-  // -------------------------------------------------
+#endif // FEATURE_OAD
 }
 
 /*********************************************************************
@@ -721,7 +634,6 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
       ICall_ServiceEnum src;
       ICall_HciExtEvt *pMsg = NULL;
 
-      // Fetch any available messages that might have been sent from the stack
       if (ICall_fetchServiceMsg(&src, &dest,
                                 (void **)&pMsg) == ICALL_ERRNO_SUCCESS)
       {
@@ -731,7 +643,16 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
         {
           ICall_Stack_Event *pEvt = (ICall_Stack_Event *)pMsg;
 
-          if (pEvt->signature != 0xffff)
+          // Check for BLE stack events first
+          if (pEvt->signature == 0xffff)
+          {
+            if (pEvt->event_flag & SBP_CONN_EVT_END_EVT)
+            {
+              // Try to retransmit pending ATT Response (if any)
+              SimplePeripheral_sendAttRsp();
+            }
+          }
+          else
           {
             // Process inter-task message
             safeToDealloc = SimplePeripheral_processStackMsg((ICall_Hdr *)pMsg);
@@ -743,37 +664,52 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
           ICall_freeMsg(pMsg);
         }
       }
+    }
 
-      // If RTOS queue is not empty, process app message.
-      if (events & SBP_QUEUE_EVT)
+    // If RTOS queue is not empty, process app message.
+    while (!Queue_empty(appMsgQueue))
+    {
+      sbpEvt_t *pMsg = (sbpEvt_t *)Util_dequeueMsg(appMsgQueue);
+      if (pMsg)
       {
-        while (!Queue_empty(appMsgQueue))
-        {
-          sbpEvt_t *pMsg = (sbpEvt_t *)Util_dequeueMsg(appMsgQueue);
-          if (pMsg)
-          {
-            // Process message.
-            SimplePeripheral_processAppMsg(pMsg);
+        // Process message.
+        SimplePeripheral_processAppMsg(pMsg);
 
-            // Free the space from the message.
-            ICall_free(pMsg);
-          }
-        }
-      }
-
-      if (events & SBP_PERIODIC_EVT)
-      {
-        Util_startClock(&periodicClock);
-
-        // Perform periodic application task
-        SimplePeripheral_performPeriodicTask();
-      }
-
-      if (events & SBP_SC_ALERT_EVT)
-      {
-        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5, 5, scSensorPayload);
+        // Free the space from the message.
+        ICall_free(pMsg);
       }
     }
+
+#ifndef POWER_MEASURE
+    if (events & SBP_PERIODIC_EVT)
+    {
+      Util_startClock(&periodicClock);
+
+      // Perform periodic application task
+      SimplePeripheral_performPeriodicTask();
+    }
+#endif // ! POWER_MEASURE
+
+#ifdef FEATURE_OAD
+    while (!Queue_empty(hOadQ))
+    {
+      oadTargetWrite_t *oadWriteEvt = Queue_get(hOadQ);
+
+      // Identify new image.
+      if (oadWriteEvt->event == OAD_WRITE_IDENTIFY_REQ)
+      {
+        OAD_imgIdentifyWrite(oadWriteEvt->connHandle, oadWriteEvt->pData);
+      }
+      // Write a next block request.
+      else if (oadWriteEvt->event == OAD_WRITE_BLOCK_REQ)
+      {
+        OAD_imgBlockWrite(oadWriteEvt->connHandle, oadWriteEvt->pData);
+      }
+
+      // Free buffer.
+      ICall_free(oadWriteEvt);
+    }
+#endif //FEATURE_OAD
   }
 }
 
@@ -799,58 +735,11 @@ static uint8_t SimplePeripheral_processStackMsg(ICall_Hdr *pMsg)
 
     case HCI_GAP_EVENT_EVENT:
       {
-
         // Process HCI message
         switch(pMsg->status)
         {
           case HCI_COMMAND_COMPLETE_EVENT_CODE:
             // Process HCI Command Complete Event
-            {
-
-#if !defined (USE_LL_CONN_PARAM_UPDATE)
-              // This code will disable the use of the LL_CONNECTION_PARAM_REQ
-              // control procedure (for connection parameter updates, the
-              // L2CAP Connection Parameter Update procedure will be used
-              // instead). To re-enable the LL_CONNECTION_PARAM_REQ control
-              // procedures, define the symbol USE_LL_CONN_PARAM_UPDATE
-              // The L2CAP Connection Parameter Update procedure is used to
-              // support a delta between the minimum and maximum connection
-              // intervals required by some iOS devices.
-
-              // Parse Command Complete Event for opcode and status
-              hciEvt_CmdComplete_t* command_complete = (hciEvt_CmdComplete_t*) pMsg;
-              uint8_t   pktStatus = command_complete->pReturnParam[0];
-
-              //find which command this command complete is for
-              switch (command_complete->cmdOpcode)
-              {
-                case HCI_LE_READ_LOCAL_SUPPORTED_FEATURES:
-                  {
-                    if (pktStatus == SUCCESS)
-                    {
-                      uint8_t featSet[8];
-
-                      // Get current feature set from received event (bits 1-9
-                      // of the returned data
-                      memcpy( featSet, &command_complete->pReturnParam[1], 8 );
-
-                      // Clear bit 1 of byte 0 of feature set to disable LL
-                      // Connection Parameter Updates
-                      CLR_FEATURE_FLAG( featSet[0], LL_FEATURE_CONN_PARAMS_REQ );
-
-                      // Update controller with modified features
-                      HCI_EXT_SetLocalSupportedFeaturesCmd( featSet );
-                    }
-                  }
-                  break;
-
-                default:
-                  //do nothing
-                  break;
-              }
-#endif // !defined (USE_LL_CONN_PARAM_UPDATE)
-
-            }
             break;
 
           case HCI_BLE_HARDWARE_ERROR_EVENT_CODE:
@@ -863,11 +752,10 @@ static uint8_t SimplePeripheral_processStackMsg(ICall_Hdr *pMsg)
       }
       break;
 
-      default:
-        // do nothing
-        break;
-
-    }
+    default:
+      // do nothing
+      break;
+  }
 
   return (safeToDealloc);
 }
@@ -882,12 +770,19 @@ static uint8_t SimplePeripheral_processStackMsg(ICall_Hdr *pMsg)
 static uint8_t SimplePeripheral_processGATTMsg(gattMsgEvent_t *pMsg)
 {
   // See if GATT server was unable to transmit an ATT response
-  if (attRsp_isAttRsp(pMsg))
+  if (pMsg->hdr.status == blePending)
   {
     // No HCI buffer was available. Let's try to retransmit the response
     // on the next connection event.
-    if( SimplePeripheral_RegistertToAllConnectionEvent(FOR_ATT_RSP) == SUCCESS)
+    if (HCI_EXT_ConnEventNoticeCmd(pMsg->connHandle, selfEntity,
+                                   SBP_CONN_EVT_END_EVT) == SUCCESS)
     {
+      // First free any pending response
+      SimplePeripheral_freeAttRsp(FAILURE);
+
+      // Hold on to the response message for retransmission
+      pAttRsp = pMsg;
+
       // Don't free the response message yet
       return (FALSE);
     }
@@ -904,7 +799,7 @@ static uint8_t SimplePeripheral_processGATTMsg(gattMsgEvent_t *pMsg)
   else if (pMsg->method == ATT_MTU_UPDATED_EVENT)
   {
     // MTU size updated
-    Display_print1(dispHandle, 5, 0, "MTU Size: %d", pMsg->msg.mtuEvt.MTU);
+    Display_print1(dispHandle, 5, 0, "MTU Size: $d", pMsg->msg.mtuEvt.MTU);
   }
 
   // Free message payload. Needed only for ATT Protocol messages
@@ -915,29 +810,77 @@ static uint8_t SimplePeripheral_processGATTMsg(gattMsgEvent_t *pMsg)
 }
 
 /*********************************************************************
- * @fn      SimplePeripheral_processConnEvt
+ * @fn      SimplePeripheral_sendAttRsp
  *
- * @brief   Process connection event.
+ * @brief   Send a pending ATT response message.
  *
- * @param pReport pointer to connection event report
+ * @param   none
+ *
+ * @return  none
  */
-static void SimplePeripheral_processConnEvt(Gap_ConnEventRpt_t *pReport)
+static void SimplePeripheral_sendAttRsp(void)
 {
-
-  if( CONNECTION_EVENT_REGISTRATION_CAUSE(FOR_ATT_RSP))
+  // See if there's a pending ATT Response to be transmitted
+  if (pAttRsp != NULL)
   {
-    // The GATT server might have returned a blePending as it was trying
-    // to process an ATT Response. Now that we finished with this
-    // connection event, let's try sending any remaining ATT Responses
-    // on the next connection event.
-    // Try to retransmit pending ATT Response (if any)
-    if (attRsp_sendAttRsp() == SUCCESS)
+    uint8_t status;
+
+    // Increment retransmission count
+    rspTxRetry++;
+
+    // Try to retransmit ATT response till either we're successful or
+    // the ATT Client times out (after 30s) and drops the connection.
+    status = GATT_SendRsp(pAttRsp->connHandle, pAttRsp->method, &(pAttRsp->msg));
+    if ((status != blePending) && (status != MSG_BUFFER_NOT_AVAIL))
     {
-        // Disable connection event end notice
-        SimplePeripheral_UnRegistertToAllConnectionEvent (FOR_ATT_RSP);
+      // Disable connection event end notice
+      HCI_EXT_ConnEventNoticeCmd(pAttRsp->connHandle, selfEntity, 0);
+
+      // We're done with the response message
+      SimplePeripheral_freeAttRsp(status);
+    }
+    else
+    {
+      // Continue retrying
+      Display_print1(dispHandle, 5, 0, "Rsp send retry: %d", rspTxRetry);
     }
   }
+}
 
+/*********************************************************************
+ * @fn      SimplePeripheral_freeAttRsp
+ *
+ * @brief   Free ATT response message.
+ *
+ * @param   status - response transmit status
+ *
+ * @return  none
+ */
+static void SimplePeripheral_freeAttRsp(uint8_t status)
+{
+  // See if there's a pending ATT response message
+  if (pAttRsp != NULL)
+  {
+    // See if the response was sent out successfully
+    if (status == SUCCESS)
+    {
+      Display_print1(dispHandle, 5, 0, "Rsp sent retry: %d", rspTxRetry);
+    }
+    else
+    {
+      // Free response payload
+      GATT_bm_free(&pAttRsp->msg, pAttRsp->method);
+
+      Display_print1(dispHandle, 5, 0, "Rsp retry failed: %d", rspTxRetry);
+    }
+
+    // Free response message
+    ICall_freeMsg(pAttRsp);
+
+    // Reset our globals
+    pAttRsp = NULL;
+    rspTxRetry = 0;
+  }
 }
 
 /*********************************************************************
@@ -954,43 +897,13 @@ static void SimplePeripheral_processAppMsg(sbpEvt_t *pMsg)
   switch (pMsg->hdr.event)
   {
     case SBP_STATE_CHANGE_EVT:
-      {
-        SimplePeripheral_processStateChangeEvt((gaprole_States_t)pMsg->
+      SimplePeripheral_processStateChangeEvt((gaprole_States_t)pMsg->
                                                 hdr.state);
-      }
       break;
 
     case SBP_CHAR_CHANGE_EVT:
-      {
-        SimplePeripheral_processCharValueChangeEvt(pMsg->hdr.state);
-      }
+      SimplePeripheral_processCharValueChangeEvt(pMsg->hdr.state);
       break;
-
-    // Pairing event
-    case SBP_PAIRING_STATE_EVT:
-      {
-        SimplePeripheral_processPairState(pMsg->hdr.state, *pMsg->pData);
-
-        ICall_free(pMsg->pData);
-        break;
-      }
-
-    // Passcode event
-    case SBP_PASSCODE_NEEDED_EVT:
-      {
-        SimplePeripheral_processPasscode(*pMsg->pData);
-
-        ICall_free(pMsg->pData);
-        break;
-      }
-
-	case SBP_CONN_EVT:
-      {
-        SimplePeripheral_processConnEvt((Gap_ConnEventRpt_t *)(pMsg->pData));
-
-        ICall_free(pMsg->pData);
-        break;
-	  }
 
     default:
       // Do nothing.
@@ -1009,7 +922,7 @@ static void SimplePeripheral_processAppMsg(sbpEvt_t *pMsg)
  */
 static void SimplePeripheral_stateChangeCB(gaprole_States_t newState)
 {
-  SimplePeripheral_enqueueMsg(SBP_STATE_CHANGE_EVT, newState, NULL);
+  SimplePeripheral_enqueueMsg(SBP_STATE_CHANGE_EVT, newState);
 }
 
 /*********************************************************************
@@ -1055,12 +968,6 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
         // Display device address
         Display_print0(dispHandle, 1, 0, Util_convertBdAddr2Str(ownAddress));
         Display_print0(dispHandle, 2, 0, "Initialized");
-
-        // Device starts advertising upon initialization of GAP
-        uint8_t initialAdvertEnable = TRUE;
-        // Set the Peripheral GAPRole Parameters
-        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t),
-                         &initialAdvertEnable);
       }
       break;
 
@@ -1069,10 +976,11 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
       break;
 
 #ifdef PLUS_BROADCASTER
-    // After a connection is dropped, a device in PLUS_BROADCASTER will continue
-    // sending non-connectable advertisements and shall send this change of
-    // state to the application.  These are then disabled here so that sending
-    // connectable advertisements can resume.
+    /* After a connection is dropped a device in PLUS_BROADCASTER will continue
+     * sending non-connectable advertisements and shall sending this change of
+     * state to the application.  These are then disabled here so that sending
+     * connectable advertisements can resume.
+     */
     case GAPROLE_ADVERTISING_NONCONN:
       {
         uint8_t advertEnabled = FALSE;
@@ -1090,7 +998,7 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
         // Reset flag for next connection.
         firstConnFlag = false;
 
-        attRsp_freeAttRsp(bleNotConnected);
+        SimplePeripheral_freeAttRsp(bleNotConnected);
       }
       break;
 #endif //PLUS_BROADCASTER
@@ -1100,7 +1008,9 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
         linkDBInfo_t linkInfo;
         uint8_t numActive = 0;
 
+#ifndef POWER_MEASURE
         Util_startClock(&periodicClock);
+#endif // ! POWER_MEASURE
 
         numActive = linkDB_NumActive();
 
@@ -1133,7 +1043,7 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
             GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t),
                                  &advertEnabled);
 
-            // Set to true for non-connectable advertising.
+            // Set to true for non-connectabel advertising.
             advertEnabled = TRUE;
 
             // Enable non-connectable advertising.
@@ -1150,29 +1060,19 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
       break;
 
     case GAPROLE_WAITING:
-      {
-        uint8_t advertReEnable = TRUE;
+#ifndef POWER_MEASURE
+      Util_stopClock(&periodicClock);
+#endif // ! POWER_MEASURE
+      SimplePeripheral_freeAttRsp(bleNotConnected);
 
-        Util_stopClock(&periodicClock);
+      Display_print0(dispHandle, 2, 0, "Disconnected");
 
-        scifUartStopEmulator();
-
-        attRsp_freeAttRsp(bleNotConnected);
-
-        // Clear remaining lines
-        Display_clearLines(dispHandle, 3, 5);
-        
-        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &advertReEnable);
-        Display_print0(dispHandle, 2, 0, "Advertising");
-      }
+      // Clear remaining lines
+      Display_clearLines(dispHandle, 3, 5);
       break;
 
     case GAPROLE_WAITING_AFTER_TIMEOUT:
-
-      Util_stopClock(&periodicClock); // <-- 2. AGGIUNGI QUESTA: Ferma il timer anche in caso di timeout
-      scifUartStopEmulator();         // <-- 3. AGGIUNGI QUESTA: Spegni il sensore
-
-      attRsp_freeAttRsp(bleNotConnected);
+      SimplePeripheral_freeAttRsp(bleNotConnected);
 
       Display_print0(dispHandle, 2, 0, "Timed Out");
 
@@ -1182,7 +1082,7 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
       #ifdef PLUS_BROADCASTER
         // Reset flag for next connection.
         firstConnFlag = false;
-      #endif // PLUS_BROADCASTER
+      #endif //#ifdef (PLUS_BROADCASTER)
       break;
 
     case GAPROLE_ERROR:
@@ -1194,8 +1094,11 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
       break;
   }
 
+  // Update the state
+  //gapProfileState = newState;
 }
 
+#ifndef FEATURE_OAD_ONCHIP
 /*********************************************************************
  * @fn      SimplePeripheral_charValueChangeCB
  *
@@ -1208,8 +1111,9 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
  */
 static void SimplePeripheral_charValueChangeCB(uint8_t paramID)
 {
-  SimplePeripheral_enqueueMsg(SBP_CHAR_CHANGE_EVT, paramID, 0);
+  SimplePeripheral_enqueueMsg(SBP_CHAR_CHANGE_EVT, paramID);
 }
+#endif //!FEATURE_OAD_ONCHIP
 
 /*********************************************************************
  * @fn      SimplePeripheral_processCharValueChangeEvt
@@ -1223,6 +1127,7 @@ static void SimplePeripheral_charValueChangeCB(uint8_t paramID)
  */
 static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramID)
 {
+#ifndef FEATURE_OAD_ONCHIP
   uint8_t newValue;
 
   switch(paramID)
@@ -1243,8 +1148,10 @@ static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramID)
       // should not reach here!
       break;
   }
+#endif //!FEATURE_OAD_ONCHIP
 }
 
+#ifndef POWER_MEASURE
 /*********************************************************************
  * @fn      SimplePeripheral_performPeriodicTask
  *
@@ -1260,125 +1167,65 @@ static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramID)
  */
 static void SimplePeripheral_performPeriodicTask(void)
 {
-}
+#ifndef FEATURE_OAD_ONCHIP
+  uint8_t valueToCopy;
 
+  // Call to retrieve the value of the third characteristic in the profile
+  if (SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, &valueToCopy) == SUCCESS)
+  {
+    // Call to set that value of the fourth characteristic in the profile.
+    // Note that if notifications of the fourth characteristic have been
+    // enabled by a GATT client device, then a notification will be sent
+    // every time this function is called.
+    SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, sizeof(uint8_t),
+                               &valueToCopy);
+  }
+#endif //!FEATURE_OAD_ONCHIP
+}
+#endif // ! POWER_MEASURE
+
+
+#ifdef FEATURE_OAD
 /*********************************************************************
- * @fn      SimplePeripheral_pairStateCB
+ * @fn      SimplePeripheral_processOadWriteCB
  *
- * @brief   Pairing state callback.
+ * @brief   Process a write request to the OAD profile.
  *
- * @return  none
+ * @param   event      - event type:
+ *                       OAD_WRITE_IDENTIFY_REQ
+ *                       OAD_WRITE_BLOCK_REQ
+ * @param   connHandle - the connection Handle this request is from.
+ * @param   pData      - pointer to data for processing and/or storing.
+ *
+ * @return  None.
  */
-static void SimplePeripheral_pairStateCB(uint16_t connHandle, uint8_t state,
-                                            uint8_t status)
+void SimplePeripheral_processOadWriteCB(uint8_t event, uint16_t connHandle,
+                                           uint8_t *pData)
 {
-  uint8_t *pData;
+  oadTargetWrite_t *oadWriteEvt = ICall_malloc( sizeof(oadTargetWrite_t) + \
+                                             sizeof(uint8_t) * OAD_PACKET_SIZE);
 
-  // Allocate space for the event data.
-  if ((pData = ICall_malloc(sizeof(uint8_t))))
+  if ( oadWriteEvt != NULL )
   {
-    *pData = status;
+    oadWriteEvt->event = event;
+    oadWriteEvt->connHandle = connHandle;
 
-    // Queue the event.
-    SimplePeripheral_enqueueMsg(SBP_PAIRING_STATE_EVT, state, pData);
+    oadWriteEvt->pData = (uint8_t *)(&oadWriteEvt->pData + 1);
+    memcpy(oadWriteEvt->pData, pData, OAD_PACKET_SIZE);
+
+    Queue_put(hOadQ, (Queue_Elem *)oadWriteEvt);
+
+    // Post the application's event.  For OAD, no event flag is used.
+    Event_post(syncEvent, SBP_QUEUE_PING_EVT);
+  }
+  else
+  {
+    // Fail silently.
   }
 }
+#endif //FEATURE_OAD
 
-/*********************************************************************
- * @fn      SimplePeripheral_processPairState
- *
- * @brief   Process the new paring state.
- *
- * @return  none
- */
-static void SimplePeripheral_processPairState(uint8_t state, uint8_t status)
-{
-  if (state == GAPBOND_PAIRING_STATE_STARTED)
-  {
-    Display_print0(dispHandle, 2, 0, "Pairing started");
-  }
-  else if (state == GAPBOND_PAIRING_STATE_COMPLETE)
-  {
-    if (status == SUCCESS)
-    {
-      Display_print0(dispHandle, 2, 0, "Pairing success");
-    }
-    else
-    {
-      Display_print1(dispHandle, 2, 0, "Pairing fail: %d", status);
-    }
-  }
-  else if (state == GAPBOND_PAIRING_STATE_BONDED)
-  {
-    if (status == SUCCESS)
-    {
-      Display_print0(dispHandle, 2, 0, "Bonding success");
-    }
-  }
-  else if (state == GAPBOND_PAIRING_STATE_BOND_SAVED)
-  {
-    if (status == SUCCESS)
-    {
-      Display_print0(dispHandle, 2, 0, "Bond save success");
-    }
-    else
-    {
-      Display_print1(dispHandle, 2, 0, "Bond save failed: %d", status);
-    }
-  }
-}
-
-/*********************************************************************
- * @fn      SimplePeripheral_passcodeCB
- *
- * @brief   Passcode callback.
- *
- * @return  none
- */
-static void SimplePeripheral_passcodeCB(uint8_t *deviceAddr,
-                                        uint16_t connHandle,
-                                        uint8_t uiInputs,
-                                        uint8_t uiOutputs,
-                                        uint32_t numComparison)
-{
-  uint8_t *pData;
-
-  // Allocate space for the passcode event.
-  if ((pData = ICall_malloc(sizeof(uint8_t))))
-  {
-    *pData = uiOutputs;
-
-    // Enqueue the event.
-    SimplePeripheral_enqueueMsg(SBP_PASSCODE_NEEDED_EVT, 0, pData);
-  }
-}
-
-/*********************************************************************
- * @fn      SimplePeripheral_processPasscode
- *
- * @brief   Process the Passcode request.
- *
- * @return  none
- */
-static void SimplePeripheral_processPasscode(uint8_t uiOutputs)
-{
-  // This app uses a default passcode. A real-life scenario would handle all
-  // pairing scenarios and likely generate this randomly.
-  uint32_t passcode = B_APP_DEFAULT_PASSCODE;
-
-  // Display passcode to user
-  if (uiOutputs != 0)
-  {
-    Display_print1(dispHandle, 4, 0, "Passcode: %d", passcode);
-  }
-
-  uint16_t connectionHandle;
-  GAPRole_GetParameter(GAPROLE_CONNHANDLE, &connectionHandle);
-
-  // Send passcode response
-  GAPBondMgr_PasscodeRsp(connectionHandle, SUCCESS, passcode);
-}
-
+#ifndef POWER_MEASURE
 /*********************************************************************
  * @fn      SimplePeripheral_clockHandler
  *
@@ -1393,98 +1240,32 @@ static void SimplePeripheral_clockHandler(UArg arg)
   // Wake up the application.
   Event_post(syncEvent, arg);
 }
+#endif // ! POWER_MEASURE
 
 /*********************************************************************
- * @fn      SimplePeripheral_connEvtCB
- *
- * @brief   Connection event callback.
- *
- * @param pReport pointer to connection event report
- */
-static void SimplePeripheral_connEvtCB(Gap_ConnEventRpt_t *pReport)
-{
-  // Enqueue the event for processing in the app context.
-  if( SimplePeripheral_enqueueMsg(SBP_CONN_EVT, 0 ,(uint8_t *) pReport) == FALSE)
-  {
-    ICall_free(pReport);
-  }
-
-}
-
-/*********************************************************************
+ * @fn      SimplePeripheral_enqueueMsg
  *
  * @brief   Creates a message and puts the message in RTOS queue.
  *
  * @param   event - message event.
  * @param   state - message state.
- * @param   pData - message data pointer.
  *
- * @return  TRUE or FALSE
+ * @return  None.
  */
-static uint8_t SimplePeripheral_enqueueMsg(uint8_t event, uint8_t state,
-                                           uint8_t *pData)
+static void SimplePeripheral_enqueueMsg(uint8_t event, uint8_t state)
 {
-  sbpEvt_t *pMsg = ICall_malloc(sizeof(sbpEvt_t));
+  sbpEvt_t *pMsg;
 
   // Create dynamic pointer to message.
-  if (pMsg)
+  if ((pMsg = ICall_malloc(sizeof(sbpEvt_t))))
   {
     pMsg->hdr.event = event;
     pMsg->hdr.state = state;
-    pMsg->pData = pData;
 
     // Enqueue the message.
-    return Util_enqueueMsg(appMsgQueue, syncEvent, (uint8_t *)pMsg);
+    Util_enqueueMsg(appMsgQueue, syncEvent, (uint8*)pMsg);
   }
-
-  return FALSE;
 }
+
 /*********************************************************************
 *********************************************************************/
-
-
-/*********************************************************************
- * @fn      scTaskAlertCallback
- *
- * @brief   Viene chiamata dal Sensor Controller quando arrivano dati.
- * Legge il Ring Buffer UART, cerca l'Header (0xFF), decodifica
- * i 4 byte di Sasha e invia la distanza via Bluetooth.
- *********************************************************************/
-static void scTaskAlertCallback(void) {
-    static uint8_t packet[4];
-    static uint8_t packetIndex = 0;
-
-    scifClearAlertIntSource();
-
-    uint32_t count = scifUartGetRxFifoCount();
-    while (count > 0) {
-        uint8_t b = (uint8_t)scifUartRxGetChar();
-        count--;
-
-        if (packetIndex == 0) {
-            if (b == 0xFF) {
-                packet[0] = b;
-                packetIndex++;
-            }
-        } else {
-            packet[packetIndex++] = b;
-            if (packetIndex == 4) {
-                if (((packet[0] + packet[1] + packet[2]) & 0xFF) == packet[3]) {
-                    scSensorPayload[0] = packet[1];
-                    scSensorPayload[1] = packet[2];
-                    scSensorPayload[2] = 0;
-                    scSensorPayload[3] = 0;
-                    scSensorPayload[4] = 0;
-                    Event_post(syncEvent, SBP_SC_ALERT_EVT);
-                }
-                packetIndex = 0;
-            }
-        }
-    }
-
-    scifAckAlertEvents();
-    scifOsalEnableTaskAlertInt();
-}
-
-
-

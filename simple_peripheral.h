@@ -1,16 +1,16 @@
- /******************************************************************************
+/******************************************************************************
 
- @file  rcosc_calibration.h
+ @file  simple_peripheral.h
 
- @brief This file contains the RCOSC calibration routines definitions
-        and prototypes.
+ @brief This file contains the Simple Peripheral sample application
+        definitions and prototypes.
 
  Group: WCS, BTS
  Target Device: cc2640r2
 
  ******************************************************************************
  
- Copyright (c) 2016-2021, Texas Instruments Incorporated
+ Copyright (c) 2013-2024, Texas Instruments Incorporated
  All rights reserved.
 
  Redistribution and use in source and binary forms, with or without
@@ -45,8 +45,8 @@
  
  *****************************************************************************/
 
-#ifndef RCOSC_CALIBRATION_H
-#define RCOSC_CALIBRATION_H
+#ifndef SIMPLEPERIPHERAL_H
+#define SIMPLEPERIPHERAL_H
 
 #ifdef __cplusplus
 extern "C"
@@ -57,32 +57,33 @@ extern "C"
  * INCLUDES
  */
 
+/*********************************************************************
+*  EXTERNAL VARIABLES
+*/
 
 /*********************************************************************
  * CONSTANTS
  */
 
-// 1000 ms
-#define RCOSC_CALIBRATION_PERIOD              1000
+/*********************************************************************
+ * MACROS
+ */
 
 /*********************************************************************
  * FUNCTIONS
  */
 
-/*********************************************************************
- * @fn      RCOSC_enableCalibration
- *
- * @brief   enable calibration.  calibration timer will start immediately.
- *
- * @param   none
- *
- * @return  none
+/*
+ * Task creation function for the Simple Peripheral.
  */
-extern void RCOSC_enableCalibration(void);
+extern void SimplePeripheral_createTask(void);
 
+
+/*********************************************************************
+*********************************************************************/
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* RCOSC_CALIBRATION_H */
+#endif /* SIMPLEPERIPHERAL_H */
