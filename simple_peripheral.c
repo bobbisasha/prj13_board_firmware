@@ -49,12 +49,14 @@
  * INCLUDES
  */
 #include <string.h>
+#include <stdio.h>
 
 #include <ti/sysbios/knl/Task.h>
 #include <ti/sysbios/knl/Clock.h>
 #include <ti/sysbios/knl/Event.h>
 #include <ti/sysbios/knl/Queue.h>
 #include <ti/display/Display.h>
+#include <ti/drivers/UART.h>
 
 #if defined( USE_FPGA ) || defined( DEBUG_SW_TRACE )
 #include <driverlib/ioc.h>
@@ -117,6 +119,61 @@
 
 // How often to perform periodic event (in msec)
 #define SBP_PERIODIC_EVT_PERIOD               5000
+
+// ---------------------------------------------------------------------------
+// A02YYUW Ultrasonic Sensor — UART / Sensor Task
+// ---------------------------------------------------------------------------
+// Board wiring: Board_UART0 RX pin must be mapped to DIO2 (IOID_2) in your
+// board support package.  On the default CC2640R2F LaunchPad this is already
+// the case.  For a custom PCB update the UART0_RX entry in the board
+// configuration file (e.g. CC2640R2_LAUNCHXL.c or your custom board.c).
+//
+// Sensor frame (4 bytes, transmitted continuously at ~9600 baud):
+//   Byte 0 : 0xFF          (header / sync marker)
+//   Byte 1 : Data_H        (high byte of distance in mm)
+//   Byte 2 : Data_L        (low byte of distance in mm)
+//   Byte 3 : SUM           (checksum = (0xFF + Data_H + Data_L) & 0xFF)
+//
+// Distance_mm = Data_H * 256 + Data_L
+// Distance_cm = Distance_mm / 10
+// ---------------------------------------------------------------------------
+#define SENSOR_UART_BAUD          9600
+#define A02YYUW_FRAME_LEN         4      // header + Data_H + Data_L + SUM
+#define A02YYUW_HEADER            0xFF
+
+// ---------------------------------------------------------------------------
+// BLE payload
+// ---------------------------------------------------------------------------
+// Format: "Dist: NNN cm"  ->  max 12 chars + NUL = 13 bytes.
+// A 16-byte buffer is used so the total payload stays well below the
+// 64-byte UART FIFO limit and leaves room for small distance values.
+//
+// REQUIRED SDK MODIFICATION — simple_gatt_profile (CHAR4):
+//   By default CHAR4 holds a single uint8_t.  To carry the string payload
+//   you must make the following three changes in the TI SDK source files:
+//
+//   1. simple_gatt_profile.h — add (or redefine):
+//        #define SIMPLEPROFILE_CHAR4_LEN   16
+//
+//   2. simple_gatt_profile.c — change the value array declaration from:
+//        static uint8 simpleProfileChar4 = 0;
+//      to:
+//        static uint8 simpleProfileChar4[SIMPLEPROFILE_CHAR4_LEN];
+//
+//   3. simple_gatt_profile.c — in SimpleProfile_SetParameter(), case
+//      SIMPLEPROFILE_CHAR4, change:
+//        if (len == sizeof(uint8))          ->  if (len <= SIMPLEPROFILE_CHAR4_LEN)
+//        simpleProfileChar4 = *((uint8*)value); -> memcpy(simpleProfileChar4, value, len);
+//
+//   The GATT attribute entry and GATTServApp_ProcessCharCfg() call can remain
+//   unchanged; the stack reads the length from the attribute table at runtime.
+// ---------------------------------------------------------------------------
+#define DIST_BLE_PAYLOAD_LEN      16
+
+// Sensor UART reader task — higher priority so blocking UART_read() never
+// starves and no incoming sensor byte is lost.
+#define SENSOR_TASK_PRIORITY      2
+#define SENSOR_TASK_STACK_SIZE    512
 
 // Application specific event ID for HCI Connection Event End Events
 #define SBP_HCI_CONN_EVT_END_EVT              0x0001
@@ -186,6 +243,11 @@ typedef struct
 // Display Interface
 Display_Handle dispHandle = NULL;
 
+// Most-recent validated distance from the A02YYUW sensor (centimetres).
+// Written exclusively by SensorTask_taskFxn(); read by the BLE periodic task.
+// -1 means no valid reading has been received yet.
+static volatile int16_t g_distanceCm = -1;
+
 /*********************************************************************
  * LOCAL VARIABLES
  */
@@ -204,9 +266,14 @@ static Clock_Struct periodicClock;
 static Queue_Struct appMsg;
 static Queue_Handle appMsgQueue;
 
-// Task configuration
+// BLE application task
 Task_Struct sbpTask;
 Char sbpTaskStack[SBP_TASK_STACK_SIZE];
+
+// A02YYUW sensor UART reader task
+static Task_Struct sensorTask;
+static Char        sensorTaskStack[SENSOR_TASK_STACK_SIZE];
+static UART_Handle uartSensorHandle = NULL;
 
 // Scan response data (max size = 31 bytes)
 static uint8_t scanRspData[] =
@@ -277,6 +344,7 @@ static uint8_t attDeviceName[GAP_DEVICE_NAME_LEN] = "Simple Peripheral";
 
 static void SimplePeripheral_init( void );
 static void SimplePeripheral_taskFxn(UArg a0, UArg a1);
+static void SensorTask_taskFxn(UArg a0, UArg a1);
 
 static uint8_t SimplePeripheral_processStackMsg(ICall_Hdr *pMsg);
 static uint8_t SimplePeripheral_processGATTMsg(gattMsgEvent_t *pMsg);
@@ -419,13 +487,20 @@ void SimplePeripheral_createTask(void)
 {
   Task_Params taskParams;
 
-  // Configure task
+  // BLE application task
   Task_Params_init(&taskParams);
-  taskParams.stack = sbpTaskStack;
+  taskParams.stack     = sbpTaskStack;
   taskParams.stackSize = SBP_TASK_STACK_SIZE;
-  taskParams.priority = SBP_TASK_PRIORITY;
-
+  taskParams.priority  = SBP_TASK_PRIORITY;
   Task_construct(&sbpTask, SimplePeripheral_taskFxn, &taskParams, NULL);
+
+  // A02YYUW sensor UART reader task — launched at higher priority so
+  // blocking UART_read() calls pre-empt the BLE task and no bytes are lost.
+  Task_Params_init(&taskParams);
+  taskParams.stack     = sensorTaskStack;
+  taskParams.stackSize = SENSOR_TASK_STACK_SIZE;
+  taskParams.priority  = SENSOR_TASK_PRIORITY;
+  Task_construct(&sensorTask, SensorTask_taskFxn, &taskParams, NULL);
 }
 
 /*********************************************************************
@@ -1184,13 +1259,103 @@ static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramID)
 }
 
 /*********************************************************************
+ * @fn      SensorTask_taskFxn
+ *
+ * @brief   Dedicated RTOS task for the A02YYUW ultrasonic sensor.
+ *
+ *          Opens UART0 at 9600 baud (RX on DIO2) then enters an infinite
+ *          read loop:
+ *            1. Scan byte-by-byte until the 0xFF frame header is found.
+ *            2. Read the remaining 3 payload bytes (Data_H, Data_L, SUM).
+ *            3. Verify checksum: expected_SUM = (0xFF + Data_H + Data_L) & 0xFF
+ *            4. On success, convert mm -> cm and store in g_distanceCm.
+ *
+ *          Frames with a bad checksum are silently discarded and the task
+ *          re-syncs to the next header byte automatically.
+ *
+ *          Buffer budget (all within the 64-byte HW FIFO):
+ *            rxBuf[4] = 4 bytes (one complete sensor frame)
+ *
+ * @param   a0, a1 - unused RTOS task arguments
+ */
+static void SensorTask_taskFxn(UArg a0, UArg a1)
+{
+  UART_Params uartParams;
+  uint8_t     rxBuf[A02YYUW_FRAME_LEN];
+  int         rxCount;
+
+  // Configure UART: 9600-8-N-1, binary, blocking, no echo.
+  // Board_initGeneral() (called in main.c) has already run UART_init().
+  UART_Params_init(&uartParams);
+  uartParams.baudRate       = SENSOR_UART_BAUD;
+  uartParams.readMode       = UART_MODE_BLOCKING;
+  uartParams.readDataMode   = UART_DATA_BINARY;
+  uartParams.readReturnMode = UART_RETURN_FULL;
+  uartParams.writeDataMode  = UART_DATA_BINARY;
+  uartParams.dataLength     = UART_LEN_8;
+  uartParams.stopBits       = UART_STOP_ONE;
+  uartParams.parityType     = UART_PAR_NONE;
+  uartParams.readEcho       = UART_ECHO_OFF;
+
+  // Board_UART0 RX must be mapped to IOID_2 (DIO2) in the board support
+  // package.  TX is unused by this sensor but must still be assigned a valid
+  // (or IOID_UNUSED) pin in the board configuration file.
+  uartSensorHandle = UART_open(Board_UART0, &uartParams);
+  if (uartSensorHandle == NULL)
+  {
+    // UART could not be opened; exit task gracefully.
+    // Check board support package pin mapping for UART0.
+    return;
+  }
+
+  for (;;)
+  {
+    // --- Step 1: Synchronise to frame header (0xFF) ---
+    // Read one byte at a time until the sync marker is found.
+    // The A02YYUW sensor range is 3–450 cm (30–4500 mm), so Data_H and
+    // Data_L will never equal 0xFF in a valid measurement, making the
+    // header byte unambiguous.
+    do {
+      rxCount = UART_read(uartSensorHandle, &rxBuf[0], 1);
+    } while (rxCount != 1 || rxBuf[0] != A02YYUW_HEADER);
+
+    // --- Step 2: Read the remaining 3 bytes of the frame ---
+    rxCount = UART_read(uartSensorHandle, &rxBuf[1], 3);
+    if (rxCount != 3)
+    {
+      continue; // Partial read — re-sync on next iteration
+    }
+
+    // --- Step 3: Validate checksum ---
+    // SUM = (Header + Data_H + Data_L) & 0xFF
+    uint8_t expectedSum = (uint8_t)((rxBuf[0] + rxBuf[1] + rxBuf[2]) & 0xFF);
+    if (expectedSum != rxBuf[3])
+    {
+      continue; // Bad frame — discard and re-sync
+    }
+
+    // --- Step 4: Compute distance in cm and publish ---
+    uint16_t distMm  = ((uint16_t)rxBuf[1] << 8) | rxBuf[2];
+    g_distanceCm = (int16_t)(distMm / 10);
+  }
+}
+
+/*********************************************************************
  * @fn      SimplePeripheral_performPeriodicTask
  *
- * @brief   Perform a periodic application task. This function gets called
- *          every five seconds (SBP_PERIODIC_EVT_PERIOD). In this example,
- *          the value of the third characteristic in the SimpleGATTProfile
- *          service is retrieved from the profile, and then copied into the
- *          value of the the fourth characteristic.
+ * @brief   Periodic BLE notification task (fires every SBP_PERIODIC_EVT_PERIOD ms).
+ *
+ *          Reads the latest distance produced by SensorTask_taskFxn(), formats
+ *          it as the human-readable string "Dist: NNN cm", and pushes it to
+ *          connected BLE centrals via a CHAR4 notification.
+ *
+ *          Payload budget:
+ *            distStr[DIST_BLE_PAYLOAD_LEN] = 16 bytes
+ *            Worst-case content: "Dist: 450 cm\0"  = 13 bytes  (< 16, < 64)
+ *
+ *          PREREQUISITE: Apply the SDK changes described in the
+ *          REQUIRED SDK MODIFICATION comment near DIST_BLE_PAYLOAD_LEN above
+ *          so that SIMPLEPROFILE_CHAR4 can hold a byte array of 16 bytes.
  *
  * @param   None.
  *
@@ -1198,18 +1363,28 @@ static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramID)
  */
 static void SimplePeripheral_performPeriodicTask(void)
 {
-  uint8_t valueToCopy;
-
-  // Call to retrieve the value of the third characteristic in the profile
-  if (SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, &valueToCopy) == SUCCESS)
+  if (g_distanceCm < 0)
   {
-    // Call to set that value of the fourth characteristic in the profile.
-    // Note that if notifications of the fourth characteristic have been
-    // enabled by a GATT client device, then a notification will be sent
-    // every time this function is called.
-    SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, sizeof(uint8_t),
-                               &valueToCopy);
+    return; // No valid sensor reading yet
   }
+
+  // Format the human-readable BLE payload.
+  // "Dist: NNN cm" => max 12 chars + NUL = 13 bytes; fits in 16-byte buffer.
+  char    distStr[DIST_BLE_PAYLOAD_LEN];
+  int     strLen = snprintf(distStr, sizeof(distStr), "Dist: %d cm",
+                            (int)g_distanceCm);
+  if (strLen <= 0 || strLen >= (int)sizeof(distStr))
+  {
+    return; // snprintf error or unexpected truncation
+  }
+
+  // Publish to CHAR4.  If a BLE central has enabled notifications on this
+  // characteristic the stack will deliver the string automatically.
+  // strLen bytes (not null-terminated) are sent over the air.
+  SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, (uint8_t)strLen,
+                             (uint8_t *)distStr);
+
+  Display_print1(dispHandle, 4, 0, "BLE Sent: %s", distStr);
 }
 
 /*********************************************************************
