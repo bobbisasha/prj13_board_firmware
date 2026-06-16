@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "lldb",
+      "request": "launch",
+      "args": [],
+      "cwd": "/Users/luigiflaccomio/Desktop/prj13_board_firmware",
+      "program": "/Users/luigiflaccomio/Desktop/prj13_board_firmware/build/Debug/outDebug"
+    }
+  ]
+}

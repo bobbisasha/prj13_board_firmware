@@ -159,6 +159,7 @@ static void scTaskAlertCallback(void);
 #define SBP_PAIRING_STATE_EVT                 0x0004
 #define SBP_PASSCODE_NEEDED_EVT               0x0008
 #define SBP_CONN_EVT                          0x0010
+#define SBP_SC_ALERT_EVT                      Event_Id_01
 
 // Internal Events for RTOS application
 #define SBP_ICALL_EVT                         ICALL_MSG_EVENT_ID // Event_Id_31
@@ -168,7 +169,8 @@ static void scTaskAlertCallback(void);
 // Bitwise OR of all events to pend on
 #define SBP_ALL_EVENTS                        (SBP_ICALL_EVT        | \
                                                SBP_QUEUE_EVT        | \
-                                               SBP_PERIODIC_EVT)
+                                               SBP_PERIODIC_EVT     | \
+                                               SBP_SC_ALERT_EVT)
 
 
 // Set the register cause to the registration bit-mask
@@ -282,6 +284,7 @@ static uint8_t advertData[] =
 // GAP GATT Attributes
 static uint8_t attDeviceName[GAP_DEVICE_NAME_LEN] = "Simple Peripheral";
 
+static uint8_t scSensorPayload[5] = {0, 0, 0, 0, 0};
 
 /*********************************************************************
  * LOCAL FUNCTIONS
@@ -672,19 +675,18 @@ static void SimplePeripheral_init(void)
   // --------------------------------------------------------
 
   // --- INIZIALIZZAZIONE SENSOR CONTROLLER (UART) ---
-  // Inizializza il sistema operativo per il Sensor Controller
   scifOsalInit();
-  scifOsalRegisterCtrlReadyCallback(NULL); 
-  scifOsalRegisterTaskAlertCallback(scTaskAlertCallback); // Registra il "campanello"
-  
-  // Inizializza il driver
+  scifOsalRegisterCtrlReadyCallback(NULL);
+  scifOsalRegisterTaskAlertCallback(scTaskAlertCallback);
   scifInit(&scifDriverSetup);
-  
-  // Avvia il task dell'emulatore UART. 
-  // (Se ti dà errore su questa riga, controlla nel file scif.h come Sasha ha chiamato il TASK_ID)
   scifStartTasksNbl(1 << SCIF_UART_EMULATOR_TASK_ID);
-  uint8_t testForza[5] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE};
-  SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5, 5, testForza);
+
+  // Configure UART: 9600 baud, alert when >=4 bytes or byte timeout
+  scifUartSetBaudRate(9600);
+  scifUartSetRxEnableReqIdleCount(1);
+  scifUartSetRxFifoThr(4);
+  scifUartSetEventMask(BV_SCIF_UART_ALERT_RX_FIFO_ABOVE_THR | BV_SCIF_UART_ALERT_RX_BYTE_TIMEOUT);
+  scifUartRxEnable(1);
   // -------------------------------------------------
 }
 
@@ -765,6 +767,11 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
 
         // Perform periodic application task
         SimplePeripheral_performPeriodicTask();
+      }
+
+      if (events & SBP_SC_ALERT_EVT)
+      {
+        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5, 5, scSensorPayload);
       }
     }
   }
@@ -1253,60 +1260,6 @@ static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramID)
  */
 static void SimplePeripheral_performPeriodicTask(void)
 {
-  // 1. Sveglia il Sensor Controller e accende il sensore
-  scifExecuteTasksOnceNbl(1 << SCIF_UART_EMULATOR_TASK_ID);
-
-  // 2. Configura l'Emulatore UART a 9600 baud
-  scifUartSetBaudRate(9600);
-  scifUartSetRxEnableReqIdleCount(1);
-  scifUartRxEnable(1);
-
-  // 3. Il sensore impiega 100ms per accendersi, diamogli 200ms di tempo totale
-  // mettendo l'ARM in sleep per risparmiare energia.
-  Task_sleep(200000 / Clock_tickPeriod);
-
-  // 4. Controlla se sono arrivati i 4 byte nella FIFO
-  if (scifUartGetRxFifoCount() >= 4) {
-      
-      uint8_t d0 = (uint8_t)scifUartRxGetChar();
-      
-      // Verifica l'Header (0xFF)
-      if (d0 == 0xFF) { 
-          uint8_t d1 = (uint8_t)scifUartRxGetChar();
-          uint8_t d2 = (uint8_t)scifUartRxGetChar();
-          uint8_t d3 = (uint8_t)scifUartRxGetChar();
-
-          // Verifica il Checksum
-          if (((d0 + d1 + d2) & 0xFF) == d3) { 
-              
-              // Calcola distanza in millimetri
-              uint16_t distanza_mm = (d1 << 8) | d2;
-              
-              if (distanza_mm <= 4500) {
-                  // Invia il dato a 16 bit tramite Bluetooth (aggiorna la Characteristic 1)
-                  SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, sizeof(uint16_t), &distanza_mm);
-              }
-          }
-      } else {
-          // Fuori sincrono. Svuota la FIFO.
-          while(scifUartGetRxFifoCount() > 0) {
-              scifUartRxGetChar();
-          }
-      }
-  } else {
-      // Dati incompleti. Svuota la FIFO.
-      while(scifUartGetRxFifoCount() > 0) {
-          scifUartRxGetChar();
-      }
-  }
-
-  // --- LETTURA SENSORE E INVIO BLUETOOTH ---
-  // 1. Legge lo stato del sensore (0 oppure 1)
-  //uint8_t statoSensore = GPIO_readDio(14);
-
-  // 2. Invia il valore in tempo reale alla Caratteristica 1 del Bluetooth
-  //SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, sizeof(uint8_t), &statoSensore);
-  // -----------------------------------------
 }
 
 /*********************************************************************
@@ -1498,65 +1451,38 @@ static uint8_t SimplePeripheral_enqueueMsg(uint8_t event, uint8_t state,
  * i 4 byte di Sasha e invia la distanza via Bluetooth.
  *********************************************************************/
 static void scTaskAlertCallback(void) {
-    // Variabili "static" per ricordarsi lo stato tra una chiamata e l'altra
-    static uint16_t rxTail = 0;      // Il nostro "segnalibro" di lettura
-    static uint8_t packet[4];        // Qui parcheggiamo i 4 byte del pacchetto
-    static uint8_t packetIndex = 0;  // Contatore dei byte ricevuti
+    static uint8_t packet[4];
+    static uint8_t packetIndex = 0;
 
-    // 1. Pulisce l'avviso di interrupt
     scifClearAlertIntSource();
-    
-    // 2. Scopriamo dove è arrivato a scrivere il Sensor Controller 
-    // (Di default nei progetti TI si chiama rxHead nella struct state)
-    uint16_t rxHead = scifTaskData.uartEmulator.state.rxHead;
-    
-    // 3. Leggiamo tutti i byte nuovi rimasti nel buffer circolare
-    while (rxTail != rxHead) {
-        // Prende il byte dal nastro trasportatore
-        uint8_t byteRicevuto = scifTaskData.uartEmulator.output.pRxBuffer[rxTail] & 0xFF;
-        
-        // --- MACCHINA A STATI PER LEGGERE IL PACCHETTO DI SASHA ---
+
+    uint32_t count = scifUartGetRxFifoCount();
+    while (count > 0) {
+        uint8_t b = (uint8_t)scifUartRxGetChar();
+        count--;
+
         if (packetIndex == 0) {
-            if (byteRicevuto == 0xFF) { // Abbiamo trovato l'Header! Inizia il pacchetto.
-                packet[0] = byteRicevuto;
+            if (b == 0xFF) {
+                packet[0] = b;
                 packetIndex++;
             }
         } else {
-            packet[packetIndex] = byteRicevuto;
-            packetIndex++;
-            
-            if (packetIndex == 4) { // Abbiamo tutti e 4 i byte!
-                // Calcola il Checksum (Header + ByteAlto + ByteBasso)
-                uint8_t checksumCalcolato = (packet[0] + packet[1] + packet[2]) & 0xFF;
-                
-                if (checksumCalcolato == packet[3]) {
-                    // I DATI SONO PERFETTI! Inviali al Bluetooth
-                    // Creiamo un pacchetto da 5 byte (riempito di zeri)
-                    uint8_t blePayload[5] = {0, 0, 0, 0, 0}; 
-                    blePayload[0] = packet[1]; // Byte alto della distanza
-                    blePayload[1] = packet[2]; // Byte basso della distanza
-                    
-                    // Ora inviamo 5 byte esatti, così il buttafuori BLE ci fa passare!
-                    SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5, 5, blePayload);
+            packet[packetIndex++] = b;
+            if (packetIndex == 4) {
+                if (((packet[0] + packet[1] + packet[2]) & 0xFF) == packet[3]) {
+                    scSensorPayload[0] = packet[1];
+                    scSensorPayload[1] = packet[2];
+                    scSensorPayload[2] = 0;
+                    scSensorPayload[3] = 0;
+                    scSensorPayload[4] = 0;
+                    Event_post(syncEvent, SBP_SC_ALERT_EVT);
                 }
-                
-                // Resetta l'indice per aspettare il prossimo pacchetto (il prossimo 0xFF)
-                packetIndex = 0; 
+                packetIndex = 0;
             }
         }
-        // ----------------------------------------------------------
-
-        // Avanziamo il nostro segnalibro di lettura. 
-        // Se arriviamo a 64 (la fine del nastro), ricominciamo da 0.
-        if (++rxTail >= 64) {
-            rxTail = 0;
-        }
     }
-    
-    // 4. Conferma al Sensor Controller che abbiamo letto i dati
+
     scifAckAlertEvents();
-    
-    // 5. Riattiva l'allarme per il futuro
     scifOsalEnableTaskAlertInt();
 }
 
