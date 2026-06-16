@@ -854,12 +854,6 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
 
       if (events & SBP_PERIODIC_EVT)
       {
-        //Util_startClock(&periodicClock);
-
-        // Perform periodic application task
-
-        Display_print1(dispHandle,5,0, " bytes : %d", count)
-
         SimplePeripheral_performPeriodicTask();
       }
     }
