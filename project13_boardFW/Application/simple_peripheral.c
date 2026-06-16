@@ -86,12 +86,16 @@
 
 #include "simple_peripheral.h"
 
-// --- AGGIUNTE PER IL SENSOR CONTROLLER ---
-#include "scif.h"
-#include "scif_osal_tirtos.h"
+// --- UART DRIVER (sostituisce l'emulatore UART del Sensor Controller) ---
+#include <ti/drivers/UART.h>
+#include <ti/drivers/uart/UARTCC26XX.h>
 
-
-#include <ti/devices/cc26x0r2/inc/hw_aon_wuc.h>
+// Necessari per impedire lo Standby mentre la UART e' in ricezione:
+// in Standby il dominio di potenza della periferica UART e' spento e i
+// byte del sensore andrebbero persi (il Sensor Controller invece poteva
+// campionare anche in Standby).
+#include <ti/drivers/Power.h>
+#include <ti/drivers/power/PowerCC26XX.h>
 
 /*********************************************************************
  * CONSTANTS
@@ -127,6 +131,14 @@
 
 // How often to perform periodic event (in msec)
 #define SBP_PERIODIC_EVT_PERIOD               500
+
+// --- Configurazione UART per il sensore di distanza (A02YYUW: 9600 baud, solo RX) ---
+// Il pin RX e' definito nella tabella UART del board file (Board_UART0 -> DIO2).
+#define SBP_SENSOR_UART_BAUD                  9600
+// Dimensione del ring buffer applicativo riempito dalla callback UART
+#define SBP_UART_RX_RING_SIZE                 128
+// Byte richiesti per ogni chiamata a UART_read (la callback rilancia la lettura)
+#define SBP_UART_READ_CHUNK                   16
 
 // Application specific event ID for HCI Connection Event End Events
 #define SBP_HCI_CONN_EVT_END_EVT              0x0001
@@ -219,6 +231,16 @@ static Queue_Handle appMsgQueue;
 Task_Struct sbpTask;
 Char sbpTaskStack[SBP_TASK_STACK_SIZE];
 
+// --- UART del sensore di distanza ---
+// Handle del driver UART, buffer di lavoro della UART_read e ring buffer
+// applicativo (single-producer/single-consumer: la callback scrive,
+// il task periodico legge).
+static UART_Handle      sensorUartHandle = NULL;
+static uint8_t          uartReadBuf[SBP_UART_READ_CHUNK];
+static volatile uint8_t uartRxRing[SBP_UART_RX_RING_SIZE];
+static volatile uint16_t uartRxRingHead = 0;   // scritto dalla callback UART
+static volatile uint16_t uartRxRingTail = 0;   // letto dal task periodico
+
 // Scan response data (max size = 31 bytes)
 static uint8_t scanRspData[] =
 {
@@ -296,6 +318,10 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState);
 static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramID);
 static void SimplePeripheral_performPeriodicTask(void);
 static void SimplePeripheral_clockHandler(UArg arg);
+
+static void SimplePeripheral_sensorUartInit(void);
+static void SimplePeripheral_uartReadCallback(UART_Handle handle, void *buf,
+                                              size_t count);
 
 static void SimplePeripheral_passcodeCB(uint8_t *deviceAddr,
                                         uint16_t connHandle,
@@ -652,41 +678,107 @@ static void SimplePeripheral_init(void)
 
   Display_print0(dispHandle, 0, 0, "BLE Peripheral");
 
-  // --- TEST HARDWARE ---
-  // Configura il PIN 6 (LED Rosso della Launchpad) come output
-  //IOCPinTypeGpioOutput(6);
-  // Accendi il LED (1 = Acceso, 0 = Spento)
-  //GPIO_writeDio(6, 1);
-  // ---------------------
+  // --- INIZIALIZZAZIONE UART HARDWARE PER IL SENSORE DI DISTANZA ---
+  // Sostituisce completamente l'emulatore UART del Sensor Controller.
+  // Apre la UART hardware (Board_UART0, RX su DIO2) in modalita' callback
+  // e avvia la prima lettura asincrona.
+  SimplePeripheral_sensorUartInit();
+  // -----------------------------------------------------------------
+}
 
-  // --- INIZIALIZZAZIONE SENSOR CONTROLLER (UART) ---
-  // Inizializza il sistema operativo per il Sensor Controller
-  scifOsalInit();
-  scifOsalRegisterCtrlReadyCallback(NULL); 
-  scifOsalRegisterTaskAlertCallback(NULL); // Nessun interrupt necessario, usiamo il polling periodico
-  
-  // Inizializza il driver
-scifInit(&scifDriverSetup);
+/*********************************************************************
+ * @fn      SimplePeripheral_sensorUartInit
+ *
+ * @brief   Inizializza la UART hardware usata per leggere il sensore di
+ *          distanza. Sostituisce l'emulatore UART del Sensor Controller.
+ *          La UART e' aperta in modalita' callback (non bloccante), cosi'
+ *          il task BLE non viene mai messo in attesa: ogni byte ricevuto
+ *          viene accodato dalla callback nel ring buffer applicativo e
+ *          consumato dal task periodico.
+ *
+ * @param   None.
+ *
+ * @return  None.
+ */
+static void SimplePeripheral_sensorUartInit(void)
+{
+  UART_Params uartParams;
 
-  // Avvia il task dell'emulatore UART. 
-scifStartTasksNbl(1 << SCIF_UART_EMULATOR_TASK_ID);
+  // Inizializza il driver UART (una sola volta).
+  UART_init();
 
-//volatile uint16_t taskStarted = scifTaskData.uartEmulator.state.rxEnable;
+  UART_Params_init(&uartParams);
+  uartParams.baudRate      = SBP_SENSOR_UART_BAUD;   // 9600 baud
+  uartParams.readMode      = UART_MODE_CALLBACK;     // RX non bloccante
+  uartParams.writeMode     = UART_MODE_CALLBACK;     // (non usato, solo RX)
+  uartParams.readDataMode  = UART_DATA_BINARY;       // byte grezzi, nessuna elaborazione
+  uartParams.writeDataMode = UART_DATA_BINARY;
+  uartParams.readReturnMode= UART_RETURN_FULL;       // il "partial return" si abilita sotto via UART_control
+  uartParams.readEcho      = UART_ECHO_OFF;
+  uartParams.dataLength    = UART_LEN_8;
+  uartParams.stopBits      = UART_STOP_ONE;
+  uartParams.parityType    = UART_PAR_NONE;
+  uartParams.readCallback  = SimplePeripheral_uartReadCallback;
 
-  scifUartSetBaudRate(9600);    // Configura l'AUX Timer 0 per i 9600 baud [cite: 105]
-  scifUartSetRxTimeout(20);     //Imposta il timeout inter-byte (20 half-bit-period)
-  scifUartRxEnable(1);          // Attiva il ricevitore e la rilevazione del bit di start [cite: 100]
-  
-//volatile uint16_t scifStatus = scifTaskData.uartEmulator.state.rxEnabled;
+  // Board_UART0 e' mappata sul pin RX del sensore (DIO2) nel board file.
+  sensorUartHandle = UART_open(Board_UART0, &uartParams);
 
-  // TEST LOOPBACK — da rimuovere dopo il test
-Task_sleep(100000 / Clock_tickPeriod); // aspetta 100ms
-scifUartTxPutChar(0xFF);
-scifUartTxPutChar(0x01);
-scifUartTxPutChar(0x2C);
-scifUartTxPutChar(0x2D); // checksum = (0x01 + 0x2C) & 0xFF
-Task_sleep(2000000 / Clock_tickPeriod); // aspetta che la trasmissione finisca
-  // -------------------------------------------------
+  if (sensorUartHandle != NULL)
+  {
+    // Impedisce l'ingresso in Standby: il dominio della periferica UART
+    // resta alimentato e nessun byte del sensore viene perso. E' il prezzo
+    // (in consumo) da pagare per leggere via UART hardware invece che con
+    // il Sensor Controller.
+    Power_setConstraint(PowerCC26XX_SB_DISALLOW);
+
+    // Abilita il "partial return": la lettura ritorna appena la linea RX
+    // diventa inattiva, senza attendere di riempire tutto il buffer.
+    UART_control(sensorUartHandle, UARTCC26XX_CMD_RETURN_PARTIAL_ENABLE, NULL);
+
+    // Arma la prima lettura asincrona; la callback rilancia le successive.
+    UART_read(sensorUartHandle, uartReadBuf, sizeof(uartReadBuf));
+    Display_print0(dispHandle, 6, 0, "Sensor UART OK");
+  }
+  else
+  {
+    Display_print0(dispHandle, 6, 0, "Sensor UART FAIL");
+  }
+}
+
+/*********************************************************************
+ * @fn      SimplePeripheral_uartReadCallback
+ *
+ * @brief   Callback invocata dal driver UART quando arrivano dei byte.
+ *          Copia i byte ricevuti nel ring buffer applicativo e rilancia
+ *          immediatamente la lettura asincrona successiva.
+ *
+ * @param   handle - handle UART.
+ * @param   buf    - buffer con i byte ricevuti.
+ * @param   count  - numero di byte ricevuti.
+ *
+ * @return  None.
+ */
+static void SimplePeripheral_uartReadCallback(UART_Handle handle, void *buf,
+                                              size_t count)
+{
+  const uint8_t *pBuf = (const uint8_t *)buf;
+  size_t i;
+
+  for (i = 0; i < count; i++)
+  {
+    uint16_t next = (uint16_t)((uartRxRingHead + 1) % SBP_UART_RX_RING_SIZE);
+
+    // Se il ring buffer e' pieno scartiamo il byte (il dato piu' vecchio
+    // viene comunque sovrascritto al prossimo giro utile).
+    if (next != uartRxRingTail)
+    {
+      uartRxRing[uartRxRingHead] = pBuf[i];
+      uartRxRingHead = next;
+    }
+  }
+
+  // Rilancia la lettura asincrona successiva.
+  UART_read(handle, uartReadBuf, sizeof(uartReadBuf));
 }
 
 /*********************************************************************
@@ -765,6 +857,9 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
         //Util_startClock(&periodicClock);
 
         // Perform periodic application task
+
+        Display_print1(dispHandle,5,0, " bytes : %d", count)
+
         SimplePeripheral_performPeriodicTask();
       }
     }
@@ -1149,8 +1244,6 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
 
         Util_stopClock(&periodicClock);
 
-        //scifUartStopEmulator();
-
         attRsp_freeAttRsp(bleNotConnected);
 
         // Clear remaining lines
@@ -1163,8 +1256,7 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
 
     case GAPROLE_WAITING_AFTER_TIMEOUT:
 
-      Util_stopClock(&periodicClock); // <-- 2. AGGIUNGI QUESTA: Ferma il timer anche in caso di timeout
-      //scifUartStopEmulator();         // <-- 3. AGGIUNGI QUESTA: Spegni il sensore
+      Util_stopClock(&periodicClock); // Ferma il timer anche in caso di timeout
 
       attRsp_freeAttRsp(bleNotConnected);
 
@@ -1257,40 +1349,40 @@ static void SimplePeripheral_performPeriodicTask(void)
     uint32_t somma_distanze = 0;
     uint16_t campioni_validi = 0;
 
-    // 1. Controlla quanti byte ci sono (Max 63 secondo scif.h)
-    uint32_t fifoCount = scifUartGetRxFifoCount();
+    // 1. Drena il ring buffer riempito dalla callback UART in un buffer locale.
+    //    La callback (produttore) scrive uartRxRingHead; qui (consumatore)
+    //    avanziamo uartRxRingTail: lettura SPSC sicura senza disabilitare gli IRQ.
+    uint8_t  localBuf[SBP_UART_RX_RING_SIZE];
+    uint16_t count = 0;
 
-    if (fifoCount >= 4) {
-        uint8_t localBuf[64]; // Buffer temporaneo per salvare l'intera FIFO
+    while ((uartRxRingTail != uartRxRingHead) && (count < sizeof(localBuf))) {
+        localBuf[count++] = uartRxRing[uartRxRingTail];
+        uartRxRingTail = (uint16_t)((uartRxRingTail + 1) % SBP_UART_RX_RING_SIZE);
+    }
 
-        // 2. Svuota l'intera FIFO hardware in un colpo solo
-        for (uint32_t i = 0; i < fifoCount; i++) {
-            // Cast a uint8_t: ignoriamo intenzionalmente i flag di errore hardware
-            localBuf[i] = (uint8_t)scifUartRxGetChar(); 
-        }
+    // 2. Scansiona il buffer alla ricerca di pacchetti validi (Sliding Window).
+    //    Ci fermiamo a count - 4 perché un pacchetto richiede 4 byte.
+    if (count >= 4) {
+        for (uint16_t i = 0; i <= count - 4; i++) {
 
-        // 3. Scansiona il buffer alla ricerca di pacchetti validi (Sliding Window)
-        // Ci fermiamo a fifoCount - 4 perché un pacchetto richiede 4 byte
-        for (uint32_t i = 0; i <= fifoCount - 4; i++) {
-            
             if (localBuf[i] == 0xFF) {
                 uint8_t d1 = localBuf[i+1];
                 uint8_t d2 = localBuf[i+2];
                 uint8_t d3 = localBuf[i+3];
 
                 // Verifica il Checksum (Formula corretta per A02YYUW: 0xFF + H + L)
-                if (((0xFF + d1 + d2) & 0xFF) == d3) { 
-                    
+                if (((0xFF + d1 + d2) & 0xFF) == d3) {
+
                     uint16_t distanza_mm = (d1 << 8) | d2;
-                  
+
                     // Filtro: Accettiamo solo letture nel range valido del sensore
                     if (distanza_mm >= 30 && distanza_mm <= 4500) {
                         somma_distanze += distanza_mm;
                         campioni_validi++;
                     }
-                    
+
                     // Abbiamo trovato un pacchetto valido, saltiamo i prossimi 3 byte
-                    i += 3; 
+                    i += 3;
                 }
                 // Se il checksum fallisce, il ciclo `for` avanzerà semplicemente di 1 (i++),
                 // permettendoci di non perdere l'header reale se questo era un "falso" 0xFF.
