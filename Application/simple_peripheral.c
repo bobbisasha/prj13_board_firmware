@@ -1314,6 +1314,8 @@ static void SensorTask_taskFxn(UArg a0, UArg a1)
     return;
   }
 
+  UART_write(uartSensorHandle, "\r\n--- UART SUCCESSFULLY OPENED ---\r\n", 36);
+
   for (;;)
   {
     // --- Step 1: Synchronise to frame header (0xFF) ---
