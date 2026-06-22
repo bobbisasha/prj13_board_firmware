@@ -654,14 +654,14 @@ static void SimplePeripheral_init(void)
   // For more information, see the sections in the User's Guide:
   // http://software-dl.ti.com/lprf/sdg-latest/html/
   {
-    uint8_t charValue1 = 1;
+    uint8_t charValue1[2] = {0, 0};
     uint8_t charValue2 = 2;
     uint8_t charValue3 = 3;
     uint8_t charValue4 = 4;
     uint8_t charValue5[SIMPLEPROFILE_CHAR5_LEN] = { 1, 2, 3, 4, 5 };
 
-    SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, sizeof(uint8_t),
-                               &charValue1);
+    SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, 2,
+                               charValue1);
     SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR2, sizeof(uint8_t),
                                &charValue2);
     SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR3, sizeof(uint8_t),
@@ -1241,9 +1241,12 @@ static void SimplePeripheral_processCharValueChangeEvt(uint8_t paramID)
   switch(paramID)
   {
     case SIMPLEPROFILE_CHAR1:
-      SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, &newValue);
-
-      Display_print1(dispHandle, 4, 0, "Char 1: %d", (uint16_t)newValue);
+    {
+      uint8_t char1Val[2];
+      SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, char1Val);
+      uint16_t distMm = ((uint16_t)char1Val[1] << 8) | char1Val[0];
+      Display_print1(dispHandle, 4, 0, "Char 1: %d mm", distMm);
+    }
       break;
 
     case SIMPLEPROFILE_CHAR3:
@@ -1300,6 +1303,7 @@ static void SensorTask_taskFxn(UArg a0, UArg a1)
   // Board_UART0 RX must be mapped to IOID_2 (DIO2) in the board support
   // package.  TX is unused by this sensor but must still be assigned a valid
   // (or IOID_UNUSED) pin in the board configuration file.
+  UART_init();
   uartSensorHandle = UART_open(Board_UART0, &uartParams);
   if (uartSensorHandle == NULL)
   {
@@ -1365,26 +1369,18 @@ static void SimplePeripheral_performPeriodicTask(void)
 {
   if (g_distanceCm < 0)
   {
-    return; // No valid sensor reading yet
+    return;
   }
 
-  // Format the human-readable BLE payload.
-  // "Dist: NNN cm" => max 12 chars + NUL = 13 bytes; fits in 16-byte buffer.
-  char    distStr[DIST_BLE_PAYLOAD_LEN];
-  int     strLen = snprintf(distStr, sizeof(distStr), "Dist: %d cm",
-                            (int)g_distanceCm);
-  if (strLen <= 0 || strLen >= (int)sizeof(distStr))
-  {
-    return; // snprintf error or unexpected truncation
-  }
+  uint8_t  char5Val[SIMPLEPROFILE_CHAR5_LEN] = {0};
+  uint16_t dist = (uint16_t)g_distanceCm;
+  char5Val[0] = (uint8_t)(dist & 0xFF);
+  char5Val[1] = (uint8_t)((dist >> 8) & 0xFF);
 
-  // Publish to CHAR4.  If a BLE central has enabled notifications on this
-  // characteristic the stack will deliver the string automatically.
-  // strLen bytes (not null-terminated) are sent over the air.
-  SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, (uint8_t)strLen,
-                             (uint8_t *)distStr);
+  SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5, SIMPLEPROFILE_CHAR5_LEN,
+                             char5Val);
 
-  Display_print1(dispHandle, 4, 0, "BLE Sent: %s", distStr);
+  Display_print1(dispHandle, 4, 0, "BLE CHAR5: %d cm", (int)dist);
 }
 
 /*********************************************************************

@@ -64,7 +64,7 @@
  * CONSTANTS
  */
 
-#define SERVAPP_NUM_ATTR_SUPPORTED        17
+#define SERVAPP_NUM_ATTR_SUPPORTED        18
 
 /*********************************************************************
  * TYPEDEFS
@@ -178,10 +178,13 @@ static uint8 simpleProfileChar4UserDesp[17] = "Characteristic 4";
 
 
 // Simple Profile Characteristic 5 Properties
-static uint8 simpleProfileChar5Props = GATT_PROP_READ;
+static uint8 simpleProfileChar5Props = GATT_PROP_READ | GATT_PROP_NOTIFY;
 
 // Characteristic 5 Value
 static uint8 simpleProfileChar5[SIMPLEPROFILE_CHAR5_LEN] = { 0, 0, 0, 0, 0 };
+
+// Simple Profile Characteristic 5 Configuration (CCC for notifications)
+static gattCharCfg_t *simpleProfileChar5Config;
 
 // Simple Profile Characteristic 5 User Description
 static uint8 simpleProfileChar5UserDesp[17] = "Characteristic 5";
@@ -320,6 +323,14 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
         simpleProfileChar5
       },
 
+      // Characteristic 5 configuration (CCC for notifications)
+      {
+        { ATT_BT_UUID_SIZE, clientCharCfgUUID },
+        GATT_PERMIT_READ | GATT_PERMIT_WRITE,
+        0,
+        (uint8 *)&simpleProfileChar5Config
+      },
+
       // Characteristic 5 User Description
       {
         { ATT_BT_UUID_SIZE, charUserDescUUID },
@@ -391,6 +402,16 @@ bStatus_t SimpleProfile_AddService( uint32 services )
 
   // Initialize Client Characteristic Configuration attributes
   GATTServApp_InitCharCfg( INVALID_CONNHANDLE, simpleProfileChar4Config );
+
+  // Allocate Client Characteristic Configuration table for Char5
+  simpleProfileChar5Config = (gattCharCfg_t *)ICall_malloc( sizeof(gattCharCfg_t) *
+                                                             linkDBNumConns );
+  if ( simpleProfileChar5Config == NULL )
+  {
+    return ( bleMemAllocError );
+  }
+
+  GATTServApp_InitCharCfg( INVALID_CONNHANDLE, simpleProfileChar5Config );
 
   if ( services & SIMPLEPROFILE_SERVICE )
   {
@@ -505,6 +526,10 @@ bStatus_t SimpleProfile_SetParameter( uint8 param, uint8 len, void *value )
       if ( len == SIMPLEPROFILE_CHAR5_LEN )
       {
         VOID memcpy( simpleProfileChar5, value, SIMPLEPROFILE_CHAR5_LEN );
+
+        GATTServApp_ProcessCharCfg( simpleProfileChar5Config, simpleProfileChar5, FALSE,
+                                    simpleProfileAttrTbl, GATT_NUM_ATTRS( simpleProfileAttrTbl ),
+                                    INVALID_TASK_ID, simpleProfile_ReadAttrCB );
       }
       else
       {

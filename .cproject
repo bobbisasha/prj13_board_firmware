@@ -90,7 +90,7 @@
                                     <listOptionValue value="${COM_TI_SIMPLELINK_CC2640R2_SDK_SYMBOLS}"/>
                                     <listOptionValue value="DeviceFamily_CC26X0R2"/>
                                     <listOptionValue value="BOARD_DISPLAY_USE_LCD=0"/>
-                                    <listOptionValue value="BOARD_DISPLAY_USE_UART=1"/>
+                                    <listOptionValue value="BOARD_DISPLAY_USE_UART=0"/>
                                     <listOptionValue value="BOARD_DISPLAY_USE_UART_ANSI=1"/>
                                     <listOptionValue value="CC2640R2_LAUNCHXL"/>
                                     <listOptionValue value="CC26XX"/>
@@ -309,7 +309,7 @@
                                     <listOptionValue value="${COM_TI_SIMPLELINK_CC2640R2_SDK_SYMBOLS}"/>
                                     <listOptionValue value="DeviceFamily_CC26X0R2"/>
                                     <listOptionValue value="BOARD_DISPLAY_USE_LCD=0"/>
-                                    <listOptionValue value="BOARD_DISPLAY_USE_UART=1"/>
+                                    <listOptionValue value="BOARD_DISPLAY_USE_UART=0"/>
                                     <listOptionValue value="BOARD_DISPLAY_USE_UART_ANSI=1"/>
                                     <listOptionValue value="CC2640R2_LAUNCHXL"/>
                                     <listOptionValue value="CC26XX"/>
