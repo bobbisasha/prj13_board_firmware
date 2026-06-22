@@ -1301,9 +1301,9 @@ static void SensorTask_taskFxn(UArg a0, UArg a1)
   uartParams.readEcho       = UART_ECHO_OFF;
 
   // Board_UART0 RX must be mapped to IOID_2 (DIO2) in the board support
-  // package.  TX is unused by this sensor but must still be assigned a valid
-  // (or IOID_UNUSED) pin in the board configuration file.
-  UART_init();
+  // package.  TX is unused by the sensor but is used here for debug prints;
+  // both share the same UART handle so there is no conflict with Display.
+  // UART_init() was already called by Board_initGeneral() in main.c.
   uartSensorHandle = UART_open(Board_UART0, &uartParams);
   if (uartSensorHandle == NULL)
   {
@@ -1338,9 +1338,13 @@ static void SensorTask_taskFxn(UArg a0, UArg a1)
       continue; // Bad frame — discard and re-sync
     }
 
-    // --- Step 4: Compute distance in cm and publish ---
+    // --- Step 4: Compute distance in cm, publish, and print to terminal ---
     uint16_t distMm  = ((uint16_t)rxBuf[1] << 8) | rxBuf[2];
     g_distanceCm = (int16_t)(distMm / 10);
+
+    char printBuf[24];
+    int  printLen = snprintf(printBuf, sizeof(printBuf), "Dist: %d cm\r\n", (int)g_distanceCm);
+    UART_write(uartSensorHandle, printBuf, (size_t)printLen);
   }
 }
 
