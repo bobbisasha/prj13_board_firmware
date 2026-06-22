@@ -172,8 +172,8 @@
 
 // Sensor UART reader task — higher priority so blocking UART_read() never
 // starves and no incoming sensor byte is lost.
-#define SENSOR_TASK_PRIORITY      2
-#define SENSOR_TASK_STACK_SIZE    1024
+  #define SENSOR_TASK_PRIORITY      2
+  #define SENSOR_TASK_STACK_SIZE    1024
 
 // Application specific event ID for HCI Connection Event End Events
 #define SBP_HCI_CONN_EVT_END_EVT              0x0001
