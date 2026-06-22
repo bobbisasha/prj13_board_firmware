@@ -1309,9 +1309,10 @@ static void SensorTask_taskFxn(UArg a0, UArg a1)
   uartSensorHandle = UART_open(Board_UART0, &uartParams);
   if (uartSensorHandle == NULL)
   {
-    // UART could not be opened; exit task gracefully.
-    // Check board support package pin mapping for UART0.
-    return;
+    // UART could not be opened — spin here so a debugger/breakpoint
+    // can catch it. Without this, the task exits silently and nothing
+    // is ever printed.
+    while (1);
   }
 
   UART_write(uartSensorHandle, "\r\n--- UART SUCCESSFULLY OPENED ---\r\n", 36);
