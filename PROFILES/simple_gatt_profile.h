@@ -81,6 +81,9 @@ extern "C"
 // Simple Keys Profile Services bit fields
 #define SIMPLEPROFILE_SERVICE               0x00000001
 
+// Length of Characteristic 4 in bytes (string payload "Dist: NNN cm" + padding)
+#define SIMPLEPROFILE_CHAR4_LEN           16
+
 // Length of Characteristic 5 in bytes
 #define SIMPLEPROFILE_CHAR5_LEN           5
 

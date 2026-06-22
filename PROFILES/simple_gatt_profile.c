@@ -165,7 +165,7 @@ static uint8 simpleProfileChar3UserDesp[17] = "Characteristic 3";
 static uint8 simpleProfileChar4Props = GATT_PROP_NOTIFY;
 
 // Characteristic 4 Value
-static uint8 simpleProfileChar4 = 0;
+static uint8 simpleProfileChar4[SIMPLEPROFILE_CHAR4_LEN];
 
 // Simple Profile Characteristic 4 Configuration Each client has its own
 // instantiation of the Client Characteristic Configuration. Reads of the
@@ -286,9 +286,9 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
       // Characteristic Value 4
       {
         { ATT_BT_UUID_SIZE, simpleProfilechar4UUID },
+        GATT_PERMIT_READ,
         0,
-        0,
-        &simpleProfileChar4
+        simpleProfileChar4
       },
 
       // Characteristic 4 configuration
@@ -507,12 +507,13 @@ bStatus_t SimpleProfile_SetParameter( uint8 param, uint8 len, void *value )
       break;
 
     case SIMPLEPROFILE_CHAR4:
-      if ( len == sizeof ( uint8 ) )
+      if ( len <= SIMPLEPROFILE_CHAR4_LEN )
       {
-        simpleProfileChar4 = *((uint8*)value);
+        VOID memset( simpleProfileChar4, 0, SIMPLEPROFILE_CHAR4_LEN );
+        VOID memcpy( simpleProfileChar4, value, len );
 
         // See if Notification has been enabled
-        GATTServApp_ProcessCharCfg( simpleProfileChar4Config, &simpleProfileChar4, FALSE,
+        GATTServApp_ProcessCharCfg( simpleProfileChar4Config, simpleProfileChar4, FALSE,
                                     simpleProfileAttrTbl, GATT_NUM_ATTRS( simpleProfileAttrTbl ),
                                     INVALID_TASK_ID, simpleProfile_ReadAttrCB );
       }
@@ -576,7 +577,7 @@ bStatus_t SimpleProfile_GetParameter( uint8 param, void *value )
       break;
 
     case SIMPLEPROFILE_CHAR4:
-      *((uint8*)value) = simpleProfileChar4;
+      VOID memcpy( value, simpleProfileChar4, SIMPLEPROFILE_CHAR4_LEN );
       break;
 
     case SIMPLEPROFILE_CHAR5:
@@ -640,9 +641,13 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle,
         break;
         
       case SIMPLEPROFILE_CHAR2_UUID:
-      case SIMPLEPROFILE_CHAR4_UUID:
         *pLen = 1;
         pValue[0] = *pAttr->pValue;
+        break;
+
+      case SIMPLEPROFILE_CHAR4_UUID:
+        *pLen = SIMPLEPROFILE_CHAR4_LEN;
+        VOID memcpy( pValue, pAttr->pValue, SIMPLEPROFILE_CHAR4_LEN );
         break;
 
       case SIMPLEPROFILE_CHAR5_UUID:
