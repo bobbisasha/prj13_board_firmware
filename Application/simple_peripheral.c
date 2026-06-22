@@ -179,17 +179,19 @@
 #define SBP_HCI_CONN_EVT_END_EVT              0x0001
 
 // Type of Display to open
-#if !defined(Display_DISABLE_ALL)
-  #if defined(BOARD_DISPLAY_USE_LCD) && (BOARD_DISPLAY_USE_LCD!=0)
-    #define SBP_DISPLAY_TYPE Display_Type_LCD
-  #elif defined (BOARD_DISPLAY_USE_UART) && (BOARD_DISPLAY_USE_UART!=0)
-    #define SBP_DISPLAY_TYPE Display_Type_UART
-  #else // !BOARD_DISPLAY_USE_LCD && !BOARD_DISPLAY_USE_UART
-    #define SBP_DISPLAY_TYPE 0 // Option not supported
-  #endif // BOARD_DISPLAY_USE_LCD && BOARD_DISPLAY_USE_UART
-#else // BOARD_DISPLAY_USE_LCD && BOARD_DISPLAY_USE_UART
-  #define SBP_DISPLAY_TYPE 0 // No Display
-#endif // !Display_DISABLE_ALL
+// #if !defined(Display_DISABLE_ALL)
+//   #if defined(BOARD_DISPLAY_USE_LCD) && (BOARD_DISPLAY_USE_LCD!=0)
+//     #define SBP_DISPLAY_TYPE Display_Type_LCD
+//   #elif defined (BOARD_DISPLAY_USE_UART) && (BOARD_DISPLAY_USE_UART!=0)
+//     #define SBP_DISPLAY_TYPE Display_Type_UART
+//   #else // !BOARD_DISPLAY_USE_LCD && !BOARD_DISPLAY_USE_UART
+//     #define SBP_DISPLAY_TYPE 0 // Option not supported
+//   #endif // BOARD_DISPLAY_USE_LCD && BOARD_DISPLAY_USE_UART
+// #else // BOARD_DISPLAY_USE_LCD && BOARD_DISPLAY_USE_UART
+//   #define SBP_DISPLAY_TYPE 0 // No Display
+// #endif // !Display_DISABLE_ALL
+
+#define SBP_DISPLAY_TYPE 0
 
 // Task configuration
 #define SBP_TASK_PRIORITY                     1
