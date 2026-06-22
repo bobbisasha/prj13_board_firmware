@@ -1388,20 +1388,25 @@ static void SensorTask_taskFxn(UArg a0, UArg a1)
  */
 static void SimplePeripheral_performPeriodicTask(void)
 {
+  // Do nothing if we haven't gotten a valid reading yet
   if (g_distanceCm < 0)
   {
     return;
   }
 
-  uint8_t  char5Val[SIMPLEPROFILE_CHAR5_LEN] = {0};
-  uint16_t dist = (uint16_t)g_distanceCm;
-  char5Val[0] = (uint8_t)(dist & 0xFF);
-  char5Val[1] = (uint8_t)((dist >> 8) & 0xFF);
+  // --- 1. Send String to Bluetooth (CHAR4) ---
+  char bleStr[16] = {0};
+  sprintf(bleStr, "Dist: %d cm", g_distanceCm);
+  SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, strlen(bleStr), bleStr);
 
-  SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5, SIMPLEPROFILE_CHAR5_LEN,
-                             char5Val);
-
-  // Display_print1(dispHandle, 4, 0, "BLE CHAR5: %d cm", (int)dist);
+  // --- 2. Print to PC Serial Monitor (UART TX) ---
+  char serialBuf[32] = {0};
+  sprintf(serialBuf, "BLE Sent: %d cm\r\n", g_distanceCm); 
+  
+  // Use your existing uartSensorHandle!
+  if (uartSensorHandle != NULL) {
+      UART_write(uartSensorHandle, serialBuf, strlen(serialBuf));
+  }
 }
 
 /*********************************************************************
