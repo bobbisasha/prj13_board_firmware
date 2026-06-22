@@ -173,7 +173,7 @@
 // Sensor UART reader task — higher priority so blocking UART_read() never
 // starves and no incoming sensor byte is lost.
 #define SENSOR_TASK_PRIORITY      2
-#define SENSOR_TASK_STACK_SIZE    512
+#define SENSOR_TASK_STACK_SIZE    1024
 
 // Application specific event ID for HCI Connection Event End Events
 #define SBP_HCI_CONN_EVT_END_EVT              0x0001
@@ -1338,13 +1338,30 @@ static void SensorTask_taskFxn(UArg a0, UArg a1)
       continue; // Bad frame — discard and re-sync
     }
 
-    // --- Step 4: Compute distance in cm, publish, and print to terminal ---
-    uint16_t distMm  = ((uint16_t)rxBuf[1] << 8) | rxBuf[2];
-    g_distanceCm = (int16_t)(distMm / 10);
+    // --- Step 4: Range-check, store, and print (logic from Arduino reference) ---
+    uint16_t distMm = ((uint16_t)rxBuf[1] << 8) | rxBuf[2];
 
-    char printBuf[24];
-    int  printLen = snprintf(printBuf, sizeof(printBuf), "Dist: %d cm\r\n", (int)g_distanceCm);
-    UART_write(uartSensorHandle, printBuf, (size_t)printLen);
+    if (distMm >= 4000 || distMm <= 30)
+    {
+      UART_write(uartSensorHandle, "OutOfRange\r\n", 12);
+    }
+    else
+    {
+      g_distanceCm = (int16_t)(distMm / 10);
+
+      // uint16 -> decimal ASCII without printf (safe on all TI runtime configs).
+      char    buf[10];
+      uint8_t pos = 0;
+      char    rev[5];
+      uint8_t rlen = 0;
+      uint16_t v = distMm;
+      if (v == 0) { rev[rlen++] = '0'; }
+      else { while (v > 0) { rev[rlen++] = '0' + (v % 10); v /= 10; } }
+      while (rlen > 0) buf[pos++] = rev[--rlen];
+      buf[pos++] = ' '; buf[pos++] = 'm'; buf[pos++] = 'm';
+      buf[pos++] = '\r'; buf[pos++] = '\n';
+      UART_write(uartSensorHandle, buf, pos);
+    }
   }
 }
 
