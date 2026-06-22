@@ -165,6 +165,8 @@ int main()
 
   Board_initGeneral();
 
+  UART_init();
+
 #ifdef CC1350_LAUNCHXL
   // Enable 2.4GHz Radio
   radCtrlHandle = PIN_open(&radCtrlState, radCtrlCfg);

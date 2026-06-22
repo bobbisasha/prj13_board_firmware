@@ -1401,7 +1401,7 @@ static void SimplePeripheral_performPeriodicTask(void)
   SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5, SIMPLEPROFILE_CHAR5_LEN,
                              char5Val);
 
-  Display_print1(dispHandle, 4, 0, "BLE CHAR5: %d cm", (int)dist);
+  // Display_print1(dispHandle, 4, 0, "BLE CHAR5: %d cm", (int)dist);
 }
 
 /*********************************************************************
