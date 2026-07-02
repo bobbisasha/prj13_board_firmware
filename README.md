@@ -1,154 +1,73 @@
-\# 🦇 BLE Ultrasonic Sensor (TI CC26xx \& Sensor Controller)
+# 🦇 BLE Ultrasonic Sensor (TI CC26xx & Sensor Controller)
 
+Ultra-low-power firmware for reading an ultrasonic distance sensor (A02YYUW or UART-compatible equivalent) and streaming distance telemetry over BLE.
 
+The firmware splits work across the CC26xx's dual-core architecture to maximize battery life:
 
-\## 📖 Project Overview
+- **Sensor Controller** (low-power coprocessor): powers the sensor, emulates UART, and fills a FIFO buffer in shared AUX RAM.
+- **Main ARM Processor**: stays in Deep Sleep, waking only to read the FIFO, compute distance, update the BLE GATT profile, and sleep again.
 
-This project implements an ultra-low-power firmware for reading an ultrasonic distance sensor (e.g., model A02YYUW or compatible with UART output) and transmitting the telemetry data via Bluetooth Low Energy (BLE). 
+---
 
+## 🔌 Hardware & Pinout
 
+| Function | CC26xx Pin | Sensor Pin | Notes |
+|---|---|---|---|
+| UART RX | `DIO2` | Sensor TX | 9600 baud |
+| UART TX | `DIO1` | Sensor RX | Optional / unused |
+| Power (VCC) | `DIO5` | VCC / MOSFET | Sensor Controller powers the sensor only during active readings |
+| GND | `GND` | GND | Common reference |
 
-The system leverages the dual-core architecture of Texas Instruments microcontrollers (such as the CC2640R2 or CC2642R1) to maximize battery life:
+---
 
-1\. The \*\*Sensor Controller\*\* (an ultra-low-power coprocessor) handles the physical power-up of the sensor, emulates a UART interface, and fills a FIFO buffer in the shared memory (AUX RAM).
+## ⏱️ Polling & Power Management
 
-2\. The \*\*Main ARM Processor\*\* remains in Deep Sleep most of the time. It wakes up only to fetch data from the FIFO, calculate the distance, update the Bluetooth GATT profile, and immediately go back to sleep.
+- **Interval:** sensor is polled every **10 s**.
+- **Flow:** on each timer tick, the ARM core wakes the Sensor Controller, which starts listening at 9600 baud.
+- **Smart sleep:** the sensor needs ~100–150 ms to boot after power-up on `DIO5`. Rather than busy-wait, the ARM core sleeps 200 ms, then wakes to read a fully populated FIFO.
+- **BLE standby:** if the BLE connection drops (`GAPROLE_WAITING`), the polling timer stops and the sensor is powered off entirely.
 
+---
 
+## 📏 UART Frame & Distance Calculation
 
-\---
+Each reading is a 4-byte frame:
 
+| Byte | Meaning |
+|---|---|
+| 0 | Header (`0xFF`) |
+| 1 | Distance MSB |
+| 2 | Distance LSB |
+| 3 | Checksum (sum of bytes 0–2) |
 
-
-\## 🔌 Hardware Details \& Pinout
-
-The wiring between the LaunchPad (or custom board) and the ultrasonic sensor is mapped as follows:
-
-
-
-| Function | CC26xx Pin | Sensor Connection | Notes |
-
-| :--- | :--- | :--- | :--- |
-
-| \*\*UART RX\*\* | `DIO 2` | Sensor TX | Reads incoming serial data at 9600 baud. |
-
-| \*\*UART TX\*\* | `DIO 1` | Sensor RX | \*(Optional/Unused)\*. |
-
-| \*\*Power (VCC)\*\*| `DIO 5` | VCC / MOSFET | Managed by the Sensor Controller to power the sensor ONLY during active readings. |
-
-| \*\*GND\*\* | `GND` | GND | Common ground reference. |
-
-
-
-\---
-
-
-
-\## ⏱️ Polling Interval \& Power Management
-
-Sensor reading occurs periodically and is managed by the TI-RTOS system clock.
-
-
-
-\* \*\*Polling Interval:\*\* The sensor is polled every \*\*10 seconds\*\* (`10000 ms`).
-
-\* \*\*Execution Flow:\*\* When the periodic timer triggers, the ARM processor wakes up the Sensor Controller and instructs it to start listening at `9600 baud`.
-
-\* \*\*Smart Sleep:\*\* The ultrasonic sensor requires roughly 100-150 ms to boot up and stabilize after receiving power via `DIO5`. To save energy, the ARM processor executes a `Task\_sleep` for \*\*200 ms\*\*, putting itself back into standby. It wakes up just in time to read the fully populated FIFO buffer.
-
-\* \*\*BLE Standby:\*\* To prevent unnecessary battery drain, if the Bluetooth connection drops or is actively disconnected (`GAPROLE\_WAITING` state), the periodic timer is stopped and the sensor is powered off entirely.
-
-
-
-\---
-
-
-
-\## 📏 Distance Calculation \& UART Parsing
-
-The sensor cyclically sends a 4-byte data frame structured as follows:
-
-1\. `Byte 0`: Fixed Header (`0xFF`)
-
-2\. `Byte 1`: Distance Data (MSB - High Byte)
-
-3\. `Byte 2`: Distance Data (LSB - Low Byte)
-
-4\. `Byte 3`: Checksum (Sum of the first three bytes)
-
-
-
-The firmware validates the packet integrity using the Checksum and calculates the final distance by merging the High and Low bytes using a bitwise shift. 
-
-
-
-Here is the core logic used in the main application task:
-
-
+The firmware validates the checksum, merges the MSB/LSB into a distance value, and updates the BLE characteristic if the reading is within range (≤ 4.5 m):
 
 ```c
-
-// Check if at least 4 bytes (one full frame) are available in the FIFO
-
 if (scifUartGetRxFifoCount() >= 4) {
+    uint8_t d0 = (uint8_t)scifUartRxGetChar();
 
-&#x20;   uint8\_t d0 = (uint8\_t)scifUartRxGetChar();
+    if (d0 == 0xFF) {
+        uint8_t d1 = (uint8_t)scifUartRxGetChar(); // MSB
+        uint8_t d2 = (uint8_t)scifUartRxGetChar(); // LSB
+        uint8_t d3 = (uint8_t)scifUartRxGetChar(); // Checksum
 
-&#x20;   
+        if (((d0 + d1 + d2) & 0xFF) == d3) {
+            uint16_t distance_mm = (d1 << 8) | d2;
 
-&#x20;   // Verify the Header
-
-&#x20;   if (d0 == 0xFF) { 
-
-&#x20;       uint8\_t d1 = (uint8\_t)scifUartRxGetChar(); // MSB
-
-&#x20;       uint8\_t d2 = (uint8\_t)scifUartRxGetChar(); // LSB
-
-&#x20;       uint8\_t d3 = (uint8\_t)scifUartRxGetChar(); // Checksum
-
-
-
-&#x20;       // Verify data integrity (8-bit Checksum)
-
-&#x20;       if (((d0 + d1 + d2) \& 0xFF) == d3) { 
-
-&#x20;           
-
-&#x20;           // Merge bytes to calculate the distance in millimeters
-
-&#x20;           uint16\_t distance\_mm = (d1 << 8) | d2;
-
-&#x20;           
-
-&#x20;           // Filter out-of-bounds readings and update BLE Characteristic (Max 4.5 meters)
-
-&#x20;           if (distance\_mm <= 4500) {
-
-&#x20;               SimpleProfile\_SetParameter(SIMPLEPROFILE\_CHAR1, sizeof(uint16\_t), \&distance\_mm);
-
-&#x20;           }
-
-&#x20;       }
-
-&#x20;   } else {
-
-&#x20;       // Out of sync: flush the FIFO
-
-&#x20;       while(scifUartGetRxFifoCount() > 0) scifUartRxGetChar();
-
-&#x20;   }
-
+            if (distance_mm <= 4500) {
+                SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, sizeof(uint16_t), &distance_mm);
+            }
+        }
+    } else {
+        while (scifUartGetRxFifoCount() > 0) scifUartRxGetChar(); // out of sync, flush
+    }
 } else {
-
-&#x20;   // Incomplete data: flush the FIFO
-
-&#x20;   while(scifUartGetRxFifoCount() > 0) scifUartRxGetChar();
-
+    while (scifUartGetRxFifoCount() > 0) scifUartRxGetChar(); // incomplete frame, flush
 }
 
+scifUartStopEmulator(); // power down sensor + controller
+```
 
+---
 
-// Safely turn off the Sensor Controller and remove power from the sensor
-
-scifUartStopEmulator();"# Project 13 Board Firmware"
-
+*Project 13 Board Firmware*
